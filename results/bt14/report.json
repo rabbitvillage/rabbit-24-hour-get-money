@@ -1,0 +1,308 @@
+{
+ "calendar_days": 14,
+ "city_days": 686,
+ "false_dead_city_days": [
+  "Beijing 2026-09-20 (won: 28°C)",
+  "Guangzhou 2026-09-20 (won: 36°C)",
+  "Manila 2026-09-20 (won: 32°C)",
+  "Qingdao 2026-09-20 (won: 29°C)",
+  "Singapore 2026-09-20 (won: 31°C)"
+ ],
+ "loss_on_false_dead_usd": -27864.95,
+ "truly_dead": {
+  "net_after_fee_usd": 5699.47,
+  "fees_usd": 277.31,
+  "capital_turned_usd": 210999.53,
+  "by_band": {
+   "0.97-0.99": {
+    "net_usd": 2476.87,
+    "capital_usd": 165723.86,
+    "trades": 2419
+   },
+   "<0.90": {
+    "net_usd": 1357.89,
+    "capital_usd": 8399.12,
+    "trades": 249
+   },
+   "0.90-0.95": {
+    "net_usd": 951.54,
+    "capital_usd": 12456.49,
+    "trades": 340
+   },
+   "0.95-0.97": {
+    "net_usd": 913.17,
+    "capital_usd": 24420.06,
+    "trades": 493
+   }
+  },
+  "by_date": {
+   "2026-09-20": {
+    "net_usd": 3256.11,
+    "capital_usd": 88938.22,
+    "trades": 2019
+   },
+   "2026-09-22": {
+    "net_usd": 910.33,
+    "capital_usd": 38560.13,
+    "trades": 516
+   },
+   "2026-09-21": {
+    "net_usd": 445.77,
+    "capital_usd": 36464.59,
+    "trades": 377
+   },
+   "2026-10-01": {
+    "net_usd": 418.8,
+    "capital_usd": 18031.68,
+    "trades": 229
+   },
+   "2026-09-19": {
+    "net_usd": 151.68,
+    "capital_usd": 2823.66,
+    "trades": 44
+   },
+   "2026-09-30": {
+    "net_usd": 145.44,
+    "capital_usd": 9923.44,
+    "trades": 82
+   },
+   "2026-09-28": {
+    "net_usd": 130.19,
+    "capital_usd": 3939.77,
+    "trades": 60
+   },
+   "2026-09-24": {
+    "net_usd": 83.64,
+    "capital_usd": 4558.9,
+    "trades": 34
+   },
+   "2026-09-25": {
+    "net_usd": 40.83,
+    "capital_usd": 1790.19,
+    "trades": 19
+   },
+   "2026-09-27": {
+    "net_usd": 33.2,
+    "capital_usd": 1268.97,
+    "trades": 12
+   },
+   "2026-10-02": {
+    "net_usd": 27.33,
+    "capital_usd": 1529.65,
+    "trades": 24
+   },
+   "2026-09-29": {
+    "net_usd": 25.25,
+    "capital_usd": 1108.71,
+    "trades": 9
+   },
+   "2026-09-23": {
+    "net_usd": 22.45,
+    "capital_usd": 1550.36,
+    "trades": 64
+   },
+   "2026-09-26": {
+    "net_usd": 8.45,
+    "capital_usd": 511.27,
+    "trades": 12
+   }
+  },
+  "by_city": {
+   "Beijing": {
+    "net_usd": 1020.67,
+    "capital_usd": 28303.11,
+    "trades": 582
+   },
+   "Guangzhou": {
+    "net_usd": 987.95,
+    "capital_usd": 25600.25,
+    "trades": 361
+   },
+   "Denver": {
+    "net_usd": 451.61,
+    "capital_usd": 7956.98,
+    "trades": 67
+   },
+   "Shenzhen": {
+    "net_usd": 409.46,
+    "capital_usd": 10089.77,
+    "trades": 302
+   },
+   "Cape Town": {
+    "net_usd": 398.96,
+    "capital_usd": 19459.4,
+    "trades": 189
+   },
+   "Kuala Lumpur": {
+    "net_usd": 309.55,
+    "capital_usd": 14260.91,
+    "trades": 177
+   },
+   "Busan": {
+    "net_usd": 223.54,
+    "capital_usd": 7394.71,
+    "trades": 147
+   },
+   "Chengdu": {
+    "net_usd": 206.55,
+    "capital_usd": 8790.75,
+    "trades": 295
+   },
+   "Ankara": {
+    "net_usd": 206.1,
+    "capital_usd": 10436.13,
+    "trades": 102
+   },
+   "London": {
+    "net_usd": 182.79,
+    "capital_usd": 9577.45,
+    "trades": 152
+   },
+   "Madrid": {
+    "net_usd": 155.39,
+    "capital_usd": 8749.6,
+    "trades": 143
+   },
+   "Milan": {
+    "net_usd": 137.66,
+    "capital_usd": 8288.8,
+    "trades": 128
+   },
+   "Lucknow": {
+    "net_usd": 137.15,
+    "capital_usd": 4270.79,
+    "trades": 77
+   },
+   "Buenos Aires": {
+    "net_usd": 125.45,
+    "capital_usd": 1980.33,
+    "trades": 15
+   },
+   "Wuhan": {
+    "net_usd": 121.13,
+    "capital_usd": 3695.61,
+    "trades": 71
+   },
+   "Paris": {
+    "net_usd": 113.6,
+    "capital_usd": 11182.1,
+    "trades": 90
+   },
+   "Chongqing": {
+    "net_usd": 93.34,
+    "capital_usd": 4500.71,
+    "trades": 91
+   },
+   "Chicago": {
+    "net_usd": 86.23,
+    "capital_usd": 5314.93,
+    "trades": 82
+   },
+   "Munich": {
+    "net_usd": 50.46,
+    "capital_usd": 2556.61,
+    "trades": 42
+   },
+   "Manila": {
+    "net_usd": 49.53,
+    "capital_usd": 2699.14,
+    "trades": 111
+   },
+   "Singapore": {
+    "net_usd": 44.89,
+    "capital_usd": 3955.43,
+    "trades": 42
+   },
+   "Qingdao": {
+    "net_usd": 43.7,
+    "capital_usd": 4197.82,
+    "trades": 52
+   },
+   "Miami": {
+    "net_usd": 27.85,
+    "capital_usd": 485.17,
+    "trades": 10
+   },
+   "Los Angeles": {
+    "net_usd": 22.38,
+    "capital_usd": 249.17,
+    "trades": 6
+   },
+   "Shanghai": {
+    "net_usd": 18.35,
+    "capital_usd": 1735.39,
+    "trades": 35
+   },
+   "Sao Paulo": {
+    "net_usd": 12.87,
+    "capital_usd": 898.97,
+    "trades": 29
+   },
+   "Istanbul": {
+    "net_usd": 12.14,
+    "capital_usd": 990.87,
+    "trades": 11
+   },
+   "Karachi": {
+    "net_usd": 12.06,
+    "capital_usd": 761.01,
+    "trades": 27
+   },
+   "Houston": {
+    "net_usd": 11.93,
+    "capital_usd": 254.31,
+    "trades": 9
+   },
+   "Panama City": {
+    "net_usd": 7.3,
+    "capital_usd": 721.52,
+    "trades": 11
+   },
+   "Jeddah": {
+    "net_usd": 6.68,
+    "capital_usd": 518.02,
+    "trades": 22
+   },
+   "Mexico City": {
+    "net_usd": 4.39,
+    "capital_usd": 442.06,
+    "trades": 4
+   },
+   "Austin": {
+    "net_usd": 3.34,
+    "capital_usd": 232.8,
+    "trades": 5
+   },
+   "Moscow": {
+    "net_usd": 1.72,
+    "capital_usd": 179.0,
+    "trades": 3
+   },
+   "Toronto": {
+    "net_usd": 1.63,
+    "capital_usd": 169.82,
+    "trades": 2
+   },
+   "Tel Aviv": {
+    "net_usd": 0.83,
+    "capital_usd": 69.94,
+    "trades": 5
+   },
+   "Seoul": {
+    "net_usd": 0.15,
+    "capital_usd": 15.27,
+    "trades": 1
+   },
+   "Dallas": {
+    "net_usd": 0.1,
+    "capital_usd": 9.9,
+    "trades": 2
+   },
+   "Taipei": {
+    "net_usd": 0.05,
+    "capital_usd": 4.95,
+    "trades": 1
+   }
+  }
+ }
+}

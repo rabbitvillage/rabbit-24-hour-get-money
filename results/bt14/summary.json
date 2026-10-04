@@ -1,0 +1,86 @@
+{
+ "city_days": 686,
+ "errors": 0,
+ "calendar_days": 14,
+ "total_event_volume_usd": 31807139.34,
+ "pickup_profit_usd": 46966.91,
+ "pickup_profit_per_calendar_day": 3354.78,
+ "pickup_share_of_volume": 0.0015,
+ "profit_within_5min": 1230.48,
+ "profit_within_30min": 2104.65,
+ "profit_by_price_band": {
+  "sell_yes 0.01-0.02": 326.37,
+  "sell_yes 0.02-0.05": 240.29,
+  "buy_no 0.95-0.98": 2013.53,
+  "buy_no 0.98-0.99": 1154.25,
+  "sell_yes >=0.05": 15733.95,
+  "buy_no <=0.95": 27498.54
+ },
+ "top_cities": [
+  [
+   12259.06,
+   "Beijing"
+  ],
+  [
+   8977.42,
+   "Manila"
+  ],
+  [
+   7946.52,
+   "Singapore"
+  ],
+  [
+   7161.89,
+   "Qingdao"
+  ],
+  [
+   6896.16,
+   "Guangzhou"
+  ],
+  [
+   469.82,
+   "Denver"
+  ],
+  [
+   429.23,
+   "Shenzhen"
+  ],
+  [
+   418.85,
+   "Cape Town"
+  ],
+  [
+   325.17,
+   "Kuala Lumpur"
+  ],
+  [
+   234.52,
+   "Busan"
+  ]
+ ],
+ "distinct_wallets": 706,
+ "top5_wallet_share": 0.368,
+ "top5_wallets": [
+  [
+   "0xeaeda62d…",
+   8343.64
+  ],
+  [
+   "0xd33e2e08…",
+   4023.49
+  ],
+  [
+   "0x13f995ad…",
+   1751.82
+  ],
+  [
+   "0x122cb94c…",
+   1588.02
+  ],
+  [
+   "0x880d2b8f…",
+   1565.69
+  ]
+ ],
+ "error_samples": []
+}
