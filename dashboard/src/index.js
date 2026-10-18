@@ -118,22 +118,22 @@ function render(s) {
   <div class="card"><div class="k">300 筆門檻</div><div class="v">${n(s.all.settled)} / 300</div><div class="bar"><i style="width:${progress}%"></i></div><div class="s">輸的比例 ${gate}</div></div>
 </section>
 <h2>主規則 <small>${esc(s.rule)}</small></h2>
-<table><thead><tr><th></th><th>場次</th><th>可進場</th><th>已結算</th><th>輸</th><th>模擬損益</th><th>每筆平均</th><th>98~99¢ 賣單中位數</th></tr></thead>
-<tbody>${statsRow("最近 24 小時", s.last24h)}${statsRow("累計", s.all)}</tbody></table>
+<div class="table-wrap"><table><thead><tr><th></th><th>場次</th><th>可進場</th><th>已結算</th><th>輸</th><th>模擬損益</th><th>每筆平均</th><th>98~99¢ 賣單中位數</th></tr></thead>
+<tbody>${statsRow("最近 24 小時", s.last24h)}${statsRow("累計", s.all)}</tbody></table></div>
 <h2>影子變體 <small>同一場盤、不同進場規則（w = 最後幾秒開始找，p = 最低買價）</small></h2>
-<table><thead><tr><th>變體</th><th>場次</th><th>可進場</th><th>已結算</th><th>輸</th><th>模擬損益</th><th>每筆平均</th><th>賣單中位數</th></tr></thead>
-<tbody>${s.variants.map((v) => statsRow(v.name, v)).join("")}</tbody></table>
+<div class="table-wrap"><table><thead><tr><th>變體</th><th>場次</th><th>可進場</th><th>已結算</th><th>輸</th><th>模擬損益</th><th>每筆平均</th><th>賣單中位數</th></tr></thead>
+<tbody>${s.variants.map((v) => statsRow(v.name, v)).join("")}</tbody></table></div>
 <h2>BTC 現價與基準價 <small>priceToBeat 收盤後才公布，距離為結算後回填</small></h2>
-<table class="kv"><tbody>
+<div class="table-wrap"><table class="kv"><tbody>
 <tr><th>有現價樣本的場次</th><td>${n(s.distance.samples)}</td><th>開盤現價 vs 基準價誤差（中位數 / P90，美元）</th><td>${n(s.distance.ptb_err_median, 2)} / ${n(s.distance.ptb_err_p90, 2)}</td></tr>
 <tr><th>最後 60 秒最接近基準價（中位數，美元）</th><td>${n(s.distance.min_abs_dist_median, 2)}</td><th>已有距離資料的進場</th><td>${n(s.distance.entries_with_dist)}</td></tr>
-</tbody></table>
+</tbody></table></div>
 <h2>最近進場（主規則）</h2>
-<table><thead><tr><th>時間（UTC）</th><th>場</th><th>邊</th><th>價</th><th>剩秒</th><th>賣單深度</th><th>結果</th><th>損益</th></tr></thead>
-<tbody>${s.recent.length ? s.recent.map((r) => `<tr><td>${esc(r.time)}</td><td>${esc(r.slug)}</td><td>${esc(r.side)}</td><td>${n(r.ask, 2)}</td><td>${n(r.secs_left, 1)}</td><td>$${n(r.depth_usd)}</td><td class="${r.won === 0 ? "bad" : r.won === 1 ? "good" : ""}">${esc(r.winner)}${r.won === 0 ? " ✗" : r.won === 1 ? " ✓" : ""}</td><td class="${(r.pnl ?? 0) < 0 ? "bad" : ""}">${money(r.pnl)}</td></tr>`).join("") : `<tr><td colspan="8">尚無</td></tr>`}</tbody></table>
+<div class="table-wrap"><table><thead><tr><th>時間（UTC）</th><th>場</th><th>邊</th><th>價</th><th>剩秒</th><th>賣單深度</th><th>結果</th><th>損益</th></tr></thead>
+<tbody>${s.recent.length ? s.recent.map((r) => `<tr><td>${esc(r.time)}</td><td>${esc(r.slug)}</td><td>${esc(r.side)}</td><td>${n(r.ask, 2)}</td><td>${n(r.secs_left, 1)}</td><td>$${n(r.depth_usd)}</td><td class="${r.won === 0 ? "bad" : r.won === 1 ? "good" : ""}">${esc(r.winner)}${r.won === 0 ? " ✗" : r.won === 1 ? " ✓" : ""}</td><td class="${(r.pnl ?? 0) < 0 ? "bad" : ""}">${money(r.pnl)}</td></tr>`).join("") : `<tr><td colspan="8">尚無</td></tr>`}</tbody></table></div>
 <h2>輸掉的場（所有變體）</h2>
-<table><thead><tr><th>時間（UTC）</th><th>場</th><th>邊</th><th>價</th><th>剩秒</th><th>進場時距離</th><th>最接近</th><th>損益</th></tr></thead>
-<tbody>${s.losses.length ? s.losses.map((r) => `<tr><td>${esc(r.time)}</td><td>${esc(r.slug)}</td><td>${esc(r.side)}</td><td>${n(r.ask, 2)}</td><td>${n(r.secs_left, 1)}</td><td>${n(r.dist_at_entry, 2)}</td><td>${n(r.min_abs_dist, 2)}</td><td class="bad">${money(r.pnl)}</td></tr>`).join("") : `<tr><td colspan="8" class="good">目前 0 筆</td></tr>`}</tbody></table>
+<div class="table-wrap"><table><thead><tr><th>時間（UTC）</th><th>場</th><th>邊</th><th>價</th><th>剩秒</th><th>進場時距離</th><th>最接近</th><th>損益</th></tr></thead>
+<tbody>${s.losses.length ? s.losses.map((r) => `<tr><td>${esc(r.time)}</td><td>${esc(r.slug)}</td><td>${esc(r.side)}</td><td>${n(r.ask, 2)}</td><td>${n(r.secs_left, 1)}</td><td>${n(r.dist_at_entry, 2)}</td><td>${n(r.min_abs_dist, 2)}</td><td class="bad">${money(r.pnl)}</td></tr>`).join("") : `<tr><td colspan="8" class="good">目前 0 筆</td></tr>`}</tbody></table></div>
 <p class="foot">只讀模擬，不下單。資料區間 ${esc(s.first_row_utc)} → ${esc(s.last_row_utc)}（UTC）。頁面每 60 秒自動重新整理。</p>`;
   }
   return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
