@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "btc5m-dashboard",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "routes": [{ "pattern": "btc5m.baixiong99.cc", "custom_domain": true }],
+  "kv_namespaces": [{ "binding": "DASH", "id": "a6cdb21896a7465aa8d5854a65208981" }],
+  "observability": { "enabled": true }
+}
