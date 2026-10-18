@@ -102,6 +102,7 @@ def watch(start, rows, lock):
         row["price_to_beat"] = m["ptb"]
         while time.time() < end - ENTRY_WINDOW:
             time.sleep(min(1, end - ENTRY_WINDOW - time.time()) if end - ENTRY_WINDOW - time.time() > 0 else 0)
+        seen_asks = []
         while not row["entered"] and time.time() < end - LAST_ENTRY:
             t_loop = time.time()
             try:
@@ -109,6 +110,9 @@ def watch(start, rows, lock):
                 for tok in m["tokens"]:
                     b, dt = get(BOOK.format(tok), timeout=5); books.append(b); ms += dt
                 asks = [best_ask(b, MAX_PRICE) for b in books]
+                lead = max((a[0] for a in asks if a[0] is not None), default=None)
+                if lead is not None:
+                    seen_asks.append(lead)
                 for i, (ask, sh, usd) in enumerate(asks):
                     if ask is not None and MIN_PRICE <= ask <= MAX_PRICE and sh >= SHARES:
                         row.update(entered=1, secs_left=round(end - time.time(), 1), side=m["outcomes"][i],
@@ -119,6 +123,8 @@ def watch(start, rows, lock):
             except Exception as e:
                 row["note"] = f"book error {type(e).__name__}"
             time.sleep(max(0, POLL - (time.time() - t_loop)))
+        if not row["entered"] and seen_asks:
+            row["note"] += f" lead ask {min(seen_asks)}-{max(seen_asks)} last {seen_asks[-1]}"
         # wait for resolution
         time.sleep(max(0, end + 60 - time.time()))
         for _ in range(60):
