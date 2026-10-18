@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .venv/
 .env
+btc5m_sim/data/
+btc5m_sim/.env
