@@ -48,7 +48,7 @@ def parse_variant(s):
     return s, int(w[1:]), int(p[1:]) / 100, filt
 
 
-VARIANTS = [parse_variant(v) for v in os.getenv("VARIANTS", "w45_p98,w30_p98,w20_p98,w45_p99,w30_p99,w45_p98_s,w45_p98_s10").split(",") if v.strip()]
+VARIANTS = [parse_variant(v) for v in os.getenv("VARIANTS", "w45_p98,w30_p98,w20_p98,w45_p99,w30_p99,w45_p98_s,w45_p98_s10,w45_p98_s20,w45_p98_s30").split(",") if v.strip()]
 
 
 def dist_ok(side, dl, min_abs):
