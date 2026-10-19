@@ -6,12 +6,19 @@ from btc5m_sim import sim
 
 class VariantParsing(unittest.TestCase):
     def test_parse(self):
-        self.assertEqual(sim.parse_variant("w30_p98"), ("w30_p98", 30, 0.98))
-        self.assertEqual(sim.parse_variant(" w45_p99 "), ("w45_p99", 45, 0.99))
+        self.assertEqual(sim.parse_variant("w30_p98"), ("w30_p98", 30, 0.98, None))
+        self.assertEqual(sim.parse_variant(" w45_p99 "), ("w45_p99", 45, 0.99, None))
+        self.assertEqual(sim.parse_variant("w45_p98_s"), ("w45_p98_s", 45, 0.98, 0.0))
+        self.assertEqual(sim.parse_variant("w45_p98_s10"), ("w45_p98_s10", 45, 0.98, 10.0))
 
     def test_defaults(self):
-        names = [n for n, _, _ in sim.VARIANTS]
-        self.assertEqual(names, ["w45_p98", "w30_p98", "w20_p98", "w45_p99", "w30_p99"])
+        names = [n for n, _, _, _ in sim.VARIANTS]
+        self.assertEqual(names, ["w45_p98", "w30_p98", "w20_p98", "w45_p99", "w30_p99", "w45_p98_s", "w45_p98_s10"])
+
+    def test_dist_ok(self):
+        self.assertTrue(sim.dist_ok("Up", 9.4, 0)); self.assertFalse(sim.dist_ok("Down", 9.4, 0))   # the 16:50 loss: Down bought while spot was +9.4
+        self.assertTrue(sim.dist_ok("Down", -12.0, 10)); self.assertFalse(sim.dist_ok("Down", -9.9, 10))
+        self.assertFalse(sim.dist_ok("Up", None, 0)); self.assertFalse(sim.dist_ok("Up", 0.0, 0))
 
 
 class BookLogic(unittest.TestCase):

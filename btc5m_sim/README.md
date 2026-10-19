@@ -11,11 +11,12 @@
 
 ## 影子變體與 BTC 距離（同一場盤同時評分，仍不下單）
 
-同一次訂單簿輪詢也拿來評分其他進場規則（`VARIANTS`，預設 `w45_p98,w30_p98,w20_p98,w45_p99,w30_p99`，
-意思是「最後 45／30／20 秒、最低買價 98¢ 或 99¢」），每場每個變體各寫一列到 `btc5m_sim/data/sim_variants.csv`。
+同一次訂單簿輪詢也拿來評分其他進場規則（`VARIANTS`，預設 `w45_p98,w30_p98,w20_p98,w45_p99,w30_p99,w45_p98_s,w45_p98_s10`，
+意思是「最後 45／30／20 秒、最低買價 98¢ 或 99¢」；`_s` ＝ 加距離過濾：BTC 現價相對「開盤時我們自己抓的現價」要站在買的那一邊，
+`_s10` ＝ 而且距離至少 10 美元。這是針對 2026-10-19 16:50 那場「貼線翻盤」加的），每場每個變體各寫一列到 `btc5m_sim/data/sim_variants.csv`。
 `sim_trades.csv` 的欄位不變，仍是主規則（ENTRY_WINDOW／MIN_PRICE）。
 
-另外從收盤前 `SPOT_WINDOW`（預設 60）秒起，每秒抓一次 BTC 現價（Coinbase，失敗改 Kraken），用來記錄：
+另外從收盤前 `SPOT_WINDOW`（預設同 `BOOK_WINDOW`＝150）秒起，每秒抓一次 BTC 現價（Coinbase 交易所即時買賣價中點，失敗改 Kraken 最後成交價），用來記錄：
 
 - `spot_at_start`／`ptb_err`：開盤那一刻我們自己抓的現價，以及它和真正 priceToBeat 的差。
   gamma 的 priceToBeat **要到收盤後才會出現**，所以盤中只能用 `spot_at_start` 當基準價的替代值；`ptb_err` 告訴你這個替代值差多少。

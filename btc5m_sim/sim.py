@@ -18,7 +18,7 @@ from datetime import datetime, timezone, timedelta
 UA = {"User-Agent": "Mozilla/5.0 btc5m-sim"}
 GAMMA = "https://gamma-api.polymarket.com/events?slug=btc-updown-5m-{}"
 BOOK = "https://clob.polymarket.com/book?token_id={}"
-SPOT_URLS = [("coinbase", "https://api.coinbase.com/v2/prices/BTC-USD/spot"),
+SPOT_URLS = [("coinbase", "https://api.exchange.coinbase.com/products/BTC-USD/ticker"),   # real-time best bid/ask
              ("kraken", "https://api.kraken.com/0/public/Ticker?pair=XBTUSD")]
 
 ENTRY_WINDOW = int(os.getenv("ENTRY_WINDOW", "45"))   # seconds before close to start looking
@@ -38,12 +38,26 @@ TWAP_WINDOW = 60                                       # resolution = Chainlink 
 
 
 def parse_variant(s):
-    """'w30_p98' -> ('w30_p98', 30, 0.98)"""
-    s = s.strip(); w, p = s.split("_")
-    return s, int(w[1:]), int(p[1:]) / 100
+    """'w30_p98' -> ('w30_p98', 30, 0.98, None); 'w45_p98_s' / 'w45_p98_s10' -> distance filter with min |spot - open| of 0 / 10 USD
+    (the side we buy must also be the side spot currently favours, relative to our own spot sample at market open)."""
+    s = s.strip(); parts = s.split("_")
+    w, p = parts[0], parts[1]
+    filt = None
+    if len(parts) > 2 and parts[2].startswith("s"):
+        filt = float(parts[2][1:] or 0)
+    return s, int(w[1:]), int(p[1:]) / 100, filt
 
 
-VARIANTS = [parse_variant(v) for v in os.getenv("VARIANTS", "w45_p98,w30_p98,w20_p98,w45_p99,w30_p99").split(",") if v.strip()]
+VARIANTS = [parse_variant(v) for v in os.getenv("VARIANTS", "w45_p98,w30_p98,w20_p98,w45_p99,w30_p99,w45_p98_s,w45_p98_s10").split(",") if v.strip()]
+
+
+def dist_ok(side, dl, min_abs):
+    """Distance filter: dl = spot now - spot at market open (proxy for priceToBeat). Up needs dl > 0, Down needs dl < 0, and |dl| >= min_abs."""
+    if dl is None:
+        return False
+    if abs(dl) < min_abs:
+        return False
+    return dl > 0 if side == "Up" else dl < 0
 
 FIELDS = ["slug", "start_utc", "price_to_beat", "entered", "secs_left", "side", "ask",
           "ask_shares_le_max", "ask_usd_le_max", "other_side_ask", "fetch_ms",
@@ -144,7 +158,7 @@ def spot():
         try:
             d, _ = get(url, timeout=3)
             if name == "coinbase":
-                return float(d["data"]["amount"])
+                return (float(d["bid"]) + float(d["ask"])) / 2
             return float(d["result"]["XXBTZUSD"]["c"][0])
         except Exception:
             continue
@@ -211,7 +225,7 @@ def watch(start, rows, vrows, lock):
     end = start + 300
     base = dict(slug=f"btc-updown-5m-{start}", start_utc=datetime.fromtimestamp(start, timezone.utc).isoformat())
     row = dict(base, entered=0, note="")
-    vstate = {n: dict(base, variant=n, window=w, min_price=p, entered=0, note="") for n, w, p in VARIANTS}
+    vstate = {n: dict(base, variant=n, window=w, min_price=p, entered=0, note="", _filt=fl) for n, w, p, fl in VARIANTS}
     samples = []
     threading.Thread(target=sample_spot, args=(end, samples), daemon=True).start()
     ptb = None; series = []
@@ -231,7 +245,7 @@ def watch(start, rows, vrows, lock):
                 v["note"] = "market not found"
             return
         ptb = m["ptb"]
-        poll_from = max([ENTRY_WINDOW, BOOK_WINDOW] + [w for _, w, _ in VARIANTS])
+        poll_from = max([ENTRY_WINDOW, BOOK_WINDOW] + [w for _, w, _, _ in VARIANTS])
         while time.time() < end - poll_from:
             time.sleep(min(1, max(0, end - poll_from - time.time())))
         if ptb is None:  # gamma sometimes fills priceToBeat late
@@ -266,6 +280,10 @@ def watch(start, rows, vrows, lock):
                     if v.get("spot_at_window") is None:  # first poll inside this variant's window
                         v["spot_at_window"] = sp
                     hit = evaluate(asks, v["min_price"], MAX_PRICE, SHARES)
+                    if hit and v["_filt"] is not None:
+                        dl = None if sp is None or spot_at_start is None else sp - spot_at_start
+                        if not dist_ok(m["outcomes"][hit[0]], dl, v["_filt"]):
+                            hit = None
                     if hit:
                         fill(v, hit, m["outcomes"], asks, secs_left, ms)
                         v["spot_at_entry"] = sp
@@ -340,7 +358,7 @@ def vsummary(vrows, since):
     """One line per variant: entries / losses / pnl."""
     rs = [r for r in vrows if r.get("_t", 0) >= since] if since else vrows
     out = []
-    for n, _, _ in VARIANTS:
+    for n, _, _, _ in VARIANTS:
         vs = [r for r in rs if r["variant"] == n]; ent = [r for r in vs if r.get("entered")]
         done = [r for r in ent if r.get("won") in (0, 1)]
         out.append(f"{n}: 進 {len(ent)}/{len(vs)} 輸 {sum(1 for r in done if r['won'] == 0)} 損益 {sum(r.get('pnl', 0) or 0 for r in done):+.2f}")
@@ -351,9 +369,9 @@ def main():
     os.makedirs(DATA, exist_ok=True)
     rows, vrows, lock, seen = [], [], threading.Lock(), set()
     log(f"start: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s; "
-        f"variants {[n for n, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")
+        f"variants {[n for n, _, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")
     tg(f"🟢 BTC 5m 模擬 bot 啟動（不下單）\n規則：最後 {ENTRY_WINDOW} 秒，領先方賣價 {MIN_PRICE}~{MAX_PRICE} 就假想買 {SHARES:g} 股\n"
-       f"影子變體：{', '.join(n for n, _, _ in VARIANTS)}")
+       f"影子變體：{', '.join(n for n, _, _, _ in VARIANTS)}")
     last_hour = int(time.time() // 3600); last_day = datetime.now(TZ).date(); day_start = time.time()
     while True:
         now = time.time()
