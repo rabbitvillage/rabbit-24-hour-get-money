@@ -32,7 +32,8 @@ TG_TOKEN = os.getenv("TG_TOKEN", "")
 TG_CHAT = os.getenv("TG_CHAT_ID", "")
 TZ = timezone(timedelta(hours=int(os.getenv("TZ_OFFSET", "8"))))
 FEE_RATE = 0.07
-SPOT_WINDOW = int(os.getenv("SPOT_WINDOW", "60"))     # sample BTC spot from this many seconds before close
+BOOK_WINDOW = int(os.getenv("BOOK_WINDOW", "150"))    # record both sides' best ask every poll from this many seconds before close
+SPOT_WINDOW = int(os.getenv("SPOT_WINDOW", str(BOOK_WINDOW)))  # sample BTC spot from this many seconds before close
 TWAP_WINDOW = 60                                       # resolution = Chainlink TWAP of the last 60s
 
 
@@ -51,6 +52,8 @@ VFIELDS = ["slug", "start_utc", "price_to_beat", "variant", "window", "min_price
            "side", "ask", "ask_shares_le_max", "ask_usd_le_max", "other_side_ask", "fetch_ms", "cost", "fee",
            "spot_at_start", "ptb_err", "spot_at_window", "dist_at_window", "spot_at_entry", "dist_at_entry",
            "twap_dist_at_entry", "min_abs_dist", "spot_samples", "winner", "won", "pnl", "note"]
+# one row per poll per market (sim_book.csv): the raw "curve" of both sides' best ask until close
+BFIELDS = ["slug", "secs_left", "up_ask", "up_sh", "up_usd", "down_ask", "down_sh", "down_usd", "spot", "fetch_ms"]
 
 
 def get(url, timeout=10):
@@ -211,7 +214,7 @@ def watch(start, rows, vrows, lock):
     vstate = {n: dict(base, variant=n, window=w, min_price=p, entered=0, note="") for n, w, p in VARIANTS}
     samples = []
     threading.Thread(target=sample_spot, args=(end, samples), daemon=True).start()
-    ptb = None
+    ptb = None; series = []
     spot_at_start = spot()  # proxy for priceToBeat (Chainlink at open), which gamma publishes only after close
     try:
         m = None
@@ -228,7 +231,7 @@ def watch(start, rows, vrows, lock):
                 v["note"] = "market not found"
             return
         ptb = m["ptb"]
-        poll_from = max([ENTRY_WINDOW] + [w for _, w, _ in VARIANTS])
+        poll_from = max([ENTRY_WINDOW, BOOK_WINDOW] + [w for _, w, _ in VARIANTS])
         while time.time() < end - poll_from:
             time.sleep(min(1, max(0, end - poll_from - time.time())))
         if ptb is None:  # gamma sometimes fills priceToBeat late
@@ -237,19 +240,21 @@ def watch(start, rows, vrows, lock):
             except Exception:
                 pass
         row["price_to_beat"] = ptb
-        seen_asks = []
+        seen_asks = []; series = []
         pending = dict(vstate)
-        while (not row["entered"] or pending) and time.time() < end - LAST_ENTRY:
+        while time.time() < end - LAST_ENTRY:
             t_loop = time.time()
             try:
                 books, ms = [], 0
                 for tok in m["tokens"]:
                     b, dt = get(BOOK.format(tok), timeout=5); books.append(b); ms += dt
                 asks = [best_ask(b, MAX_PRICE) for b in books]
-                lead = max((a[0] for a in asks if a[0] is not None), default=None)
-                if lead is not None:
-                    seen_asks.append(lead)
                 now = time.time(); secs_left = round(end - now, 1); sp = latest(samples)
+                lead = max((a[0] for a in asks if a[0] is not None), default=None)
+                if lead is not None and secs_left <= ENTRY_WINDOW:  # note range stays about the entry window
+                    seen_asks.append(lead)
+                series.append(dict(slug=row["slug"], secs_left=secs_left, up_ask=asks[0][0], up_sh=round(asks[0][1], 2), up_usd=round(asks[0][2], 2),
+                                   down_ask=asks[1][0], down_sh=round(asks[1][1], 2), down_usd=round(asks[1][2], 2), spot=sp, fetch_ms=round(ms)))
                 if not row["entered"] and secs_left <= ENTRY_WINDOW:
                     hit = evaluate(asks, MIN_PRICE, MAX_PRICE, SHARES)
                     if hit:
@@ -304,6 +309,8 @@ def watch(start, rows, vrows, lock):
             append_rows(os.path.join(DATA, "sim_trades.csv"), FIELDS, [row])
             if vstate:
                 append_rows(os.path.join(DATA, "sim_variants.csv"), VFIELDS, vstate.values())
+            if series:
+                append_rows(os.path.join(DATA, "sim_book.csv"), BFIELDS, series)
         if row.get("entered"):
             log(f"{row['slug']} buy {row['side']} @{row['ask']} ({row['secs_left']}s left, {row['ask_usd_le_max']}$ on book) -> {row.get('winner')} pnl {row.get('pnl')}")
             if row.get("won") == 0:
@@ -344,7 +351,7 @@ def main():
     os.makedirs(DATA, exist_ok=True)
     rows, vrows, lock, seen = [], [], threading.Lock(), set()
     log(f"start: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s; "
-        f"variants {[n for n, _, _ in VARIANTS]}; spot window {SPOT_WINDOW}s")
+        f"variants {[n for n, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")
     tg(f"🟢 BTC 5m 模擬 bot 啟動（不下單）\n規則：最後 {ENTRY_WINDOW} 秒，領先方賣價 {MIN_PRICE}~{MAX_PRICE} 就假想買 {SHARES:g} 股\n"
        f"影子變體：{', '.join(n for n, _, _ in VARIANTS)}")
     last_hour = int(time.time() // 3600); last_day = datetime.now(TZ).date(); day_start = time.time()

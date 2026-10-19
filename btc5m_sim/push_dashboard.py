@@ -57,6 +57,68 @@ def ts(r):
         return 0
 
 
+BUCKET = 5          # seconds per bucket on the curve
+CURVE_FROM = 150    # first bucket (matches BOOK_WINDOW)
+CURVE_DAYS = 2      # only the last N days of sim_book.csv feed the curve
+
+
+def favorite(ua, uu, da, du):
+    """(best ask, usd depth) of the favourite side, or (None, None) when the favourite has no ask.
+    Favourite = the side with the higher ask; a side with no ask while the other is cheap (<=0.5) is the favourite with nothing to buy."""
+    if ua is None and da is None:
+        return None, None
+    if ua is None:
+        return (None, None) if da <= 0.5 else (da, du)
+    if da is None:
+        return (None, None) if ua <= 0.5 else (ua, uu)
+    return (ua, uu) if ua >= da else (da, du)
+
+
+def bucket(secs):
+    """secs_left -> bucket upper edge (5..CURVE_FROM): 44.6 -> 45, 45.0 -> 45, 45.1 -> 50."""
+    b = int(-(-secs // BUCKET)) * BUCKET
+    return None if b < BUCKET or b > CURVE_FROM else b
+
+
+def book_curve(brows):
+    """Per-bucket share of markets whose favourite still has an ask, median favourite ask / depth; per-market vanish stats."""
+    by = {}
+    for r in brows:
+        by.setdefault(r["slug"], []).append(r)
+    agg = {b: [] for b in range(CURVE_FROM, 0, -BUCKET)}
+    vanish, first98, ask_secs = [], [], []
+    for slug, rs in by.items():
+        seen = {}
+        last_ask = None; f98 = None; n98 = 0
+        for r in rs:
+            s = f(r["secs_left"])
+            if s is None:
+                continue
+            fa, fu = favorite(f(r["up_ask"]), f(r["up_usd"]), f(r["down_ask"]), f(r["down_usd"]))
+            b = bucket(s)
+            if b in agg and b not in seen:          # one sample per market per bucket
+                seen[b] = True; agg[b].append((fa is not None, fa, fu))
+            if fa is not None:
+                last_ask = s if last_ask is None or s < last_ask else last_ask
+                if 0.98 <= fa <= 0.99:
+                    n98 += 1
+                    if f98 is None or s > f98:
+                        f98 = s
+        vanish.append(last_ask); first98.append(f98); ask_secs.append(n98)
+    curve = [dict(secs=b, markets=len(v), has_ask_pct=round(100 * sum(1 for h, _, _ in v if h) / len(v), 1) if v else None,
+                  median_ask=median([a for _, a, _ in v if a is not None]), median_usd=median([u for _, _, u in v if u is not None]))
+             for b, v in agg.items()]
+    n = len(by)
+    dist = dict(markets=n, never=sum(1 for x in vanish if x is None),
+                before_102=sum(1 for x in vanish if x is not None and x > 102), s60_102=sum(1 for x in vanish if x is not None and 60 < x <= 102),
+                s45_60=sum(1 for x in vanish if x is not None and 45 < x <= 60), s30_45=sum(1 for x in vanish if x is not None and 30 < x <= 45),
+                under_30=sum(1 for x in vanish if x is not None and x <= 30),
+                vanish_median=median([x for x in vanish if x is not None]),
+                with_98=sum(1 for x in first98 if x is not None), first98_median=median([x for x in first98 if x is not None]),
+                secs98_median=median([x for x, fx in zip(ask_secs, first98) if fx is not None]))
+    return curve, dist
+
+
 def service_state():
     try:
         return subprocess.run(["systemctl", "is-active", SERVICE], capture_output=True, text=True, timeout=5).stdout.strip() or "unknown"
@@ -66,6 +128,9 @@ def service_state():
 
 def build():
     rows = read("sim_trades.csv"); vrows = read("sim_variants.csv")
+    cutoff = time.time() - CURVE_DAYS * 86400
+    brows = [r for r in read("sim_book.csv") if int(r["slug"].rsplit("-", 1)[-1]) >= cutoff]
+    curve, vanish = book_curve(brows)
     now = time.time(); day = now - 86400
     ent = [r for r in rows if r.get("entered") == "1"]
     recent = [dict(slug=r["slug"].replace("btc-updown-5m-", ""), time=r["start_utc"][:16].replace("T", " "), side=r["side"], ask=f(r["ask"]),
@@ -87,7 +152,8 @@ def build():
                     entries_with_dist=sum(1 for r in vrows if r.get("entered") == "1" and f(r.get("dist_at_entry")) is not None))
     return dict(generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), host=socket.gethostname(), service=service_state(),
                 rule="最後 45 秒，領先方賣價 0.98~0.99，5 股", first_row_utc=rows[0]["start_utc"][:16] if rows else "", last_row_utc=rows[-1]["start_utc"][:16] if rows else "",
-                all=stats(rows), last24h=stats([r for r in rows if ts(r) >= day]), variants=variants, recent=recent, losses=losses, distance=distance)
+                all=stats(rows), last24h=stats([r for r in rows if ts(r) >= day]), variants=variants, recent=recent, losses=losses, distance=distance,
+                curve=curve, vanish=vanish)
 
 
 def main():

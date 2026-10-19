@@ -81,5 +81,33 @@ class CsvWriter(unittest.TestCase):
             self.assertEqual(rows, [{"a": "1", "b": ""}, {"a": "2", "b": ""}])
 
 
+class DashboardCurve(unittest.TestCase):
+    def test_favorite(self):
+        from btc5m_sim import push_dashboard as pd
+        self.assertEqual(pd.favorite(0.98, 500.0, 0.03, 10.0), (0.98, 500.0))
+        self.assertEqual(pd.favorite(0.02, 10.0, 0.97, 300.0), (0.97, 300.0))
+        self.assertEqual(pd.favorite(None, 0.0, 0.01, 5.0), (None, None))      # favourite (Up) has no ask
+        self.assertEqual(pd.favorite(None, 0.0, 0.96, 50.0), (0.96, 50.0))     # only Down quoted, and it is the favourite
+        self.assertEqual(pd.favorite(None, 0.0, None, 0.0), (None, None))
+
+    def test_bucket(self):
+        from btc5m_sim import push_dashboard as pd
+        self.assertEqual([pd.bucket(x) for x in (44.6, 45.0, 45.1, 150.0, 150.4, 4.9, 0.0)], [45, 45, 50, 150, None, 5, None])
+
+    def test_book_curve(self):
+        from btc5m_sim import push_dashboard as pd
+        rows = []
+        def add(slug, secs, ua, da, uu=100.0, du=100.0):
+            rows.append(dict(slug=slug, secs_left=str(secs), up_ask="" if ua is None else str(ua), up_usd=str(uu), down_ask="" if da is None else str(da), down_usd=str(du)))
+        add("m1", 120.0, 0.95, 0.06); add("m1", 100.0, 0.98, 0.03); add("m1", 44.0, None, 0.01)   # asks vanish after 100s
+        add("m2", 120.0, 0.90, 0.11); add("m2", 44.0, 0.99, 0.02); add("m2", 10.0, 0.99, 0.01)   # asks all the way down
+        curve, d = pd.book_curve(rows)
+        b120 = next(c for c in curve if c["secs"] == 120); b45 = next(c for c in curve if c["secs"] == 45)
+        self.assertEqual((b120["markets"], b120["has_ask_pct"], b120["median_ask"]), (2, 100.0, 0.95))
+        self.assertEqual((b45["markets"], b45["has_ask_pct"], b45["median_ask"]), (2, 50.0, 0.99))
+        self.assertEqual((d["markets"], d["never"], d["s60_102"], d["under_30"], d["with_98"]), (2, 0, 1, 1, 2))
+        self.assertEqual(d["vanish_median"], 100.0)
+
+
 if __name__ == "__main__":
     unittest.main()
