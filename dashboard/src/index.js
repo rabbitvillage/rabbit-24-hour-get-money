@@ -142,7 +142,7 @@ function render(s) {
 <h2>主規則 <small>${esc(s.rule)}</small></h2>
 <div class="table-wrap"><table><thead><tr><th></th><th>場次</th><th>可進場</th><th>已結算</th><th>輸</th><th>模擬損益</th><th>每筆平均</th><th>98~99¢ 賣單中位數</th></tr></thead>
 <tbody>${statsRow("最近 24 小時", s.last24h)}${statsRow("累計", s.all)}</tbody></table></div>
-<h2>影子變體 <small>同一場盤、不同進場規則（w = 最後幾秒開始找，p = 最低買價，_s = 現價要站在買的那一邊，_s10／_s20／_s30 = 且離基準線 ≥10／20／30 美元；基準線用鏈上 Chainlink 開盤價，讀不到才用 Coinbase 開盤價）</small></h2>
+<h2>影子變體 <small>同一場盤、不同進場規則（w = 最後幾秒開始找，p = 最低買價，m = 價格上限（領先方 50¢～m 都買），_s = 現價要站在買的那一邊，_s10／_s20／_s30 = 且離基準線 ≥10／20／30 美元；基準線用鏈上 Chainlink 開盤價，讀不到才用 Coinbase 開盤價）</small></h2>
 <div class="table-wrap"><table><thead><tr><th>變體</th><th>場次</th><th>可進場</th><th>已結算</th><th>輸</th><th>模擬損益</th><th>每筆平均</th><th>賣單中位數</th></tr></thead>
 <tbody>${s.variants.map((v) => statsRow(v.name, v)).join("")}</tbody></table></div>
 <h2>最後 150 秒的訂單簿曲線 <small>每秒取樣；虛線 = 剩 102 秒（人工觀察的賣單消失點）與剩 45 秒（進場窗口）；最近 2 天</small></h2>

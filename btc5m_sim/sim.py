@@ -42,17 +42,21 @@ TWAP_WINDOW = 60                                       # resolution = Chainlink 
 
 
 def parse_variant(s):
-    """'w30_p98' -> ('w30_p98', 30, 0.98, None); 'w45_p98_s' / 'w45_p98_s10' -> distance filter with min |spot - open| of 0 / 10 USD
-    (the side we buy must also be the side spot currently favours, relative to our own spot sample at market open)."""
+    """Variant spec -> (name, window_s, min_price, max_price, dist_filter):
+       'w30_p98'      buy the favourite only at 0.98..MAX_PRICE in the last 30s (p = price floor, the original rule)
+       'w60_m95'      buy the favourite at ANY ask 0.50..0.95 in the last 60s (m = price cap: earlier, cheaper entries)
+       '..._s' / '..._s10'  distance filter: spot must favour the side we buy relative to the line (on-chain open price),
+                     and |spot - line| >= 0 / 10 USD."""
     s = s.strip(); parts = s.split("_")
-    w, p = parts[0], parts[1]
+    w, pr = parts[0], parts[1]
+    lo, hi = (int(pr[1:]) / 100, MAX_PRICE) if pr.startswith("p") else (0.5, int(pr[1:]) / 100)
     filt = None
     if len(parts) > 2 and parts[2].startswith("s"):
         filt = float(parts[2][1:] or 0)
-    return s, int(w[1:]), int(p[1:]) / 100, filt
+    return s, int(w[1:]), lo, hi, filt
 
 
-VARIANTS = [parse_variant(v) for v in os.getenv("VARIANTS", "w45_p98,w30_p98,w20_p98,w45_p99,w30_p99,w45_p98_s,w45_p98_s10,w45_p98_s20,w45_p98_s30").split(",") if v.strip()]
+VARIANTS = [parse_variant(v) for v in os.getenv("VARIANTS", "w45_p98,w30_p98,w20_p98,w45_p99,w30_p99,w45_p98_s,w45_p98_s10,w45_p98_s20,w45_p98_s30,w60_m95_s10,w60_m95_s20").split(",") if v.strip()]
 
 
 def dist_ok(side, dl, min_abs):
@@ -291,7 +295,7 @@ def watch(start, rows, vrows, lock):
     end = start + 300
     base = dict(slug=f"btc-updown-5m-{start}", start_utc=datetime.fromtimestamp(start, timezone.utc).isoformat())
     row = dict(base, entered=0, note="")
-    vstate = {n: dict(base, variant=n, window=w, min_price=p, entered=0, note="", _filt=fl) for n, w, p, fl in VARIANTS}
+    vstate = {n: dict(base, variant=n, window=w, min_price=p, entered=0, note="", _filt=fl, _max=hi) for n, w, p, hi, fl in VARIANTS}
     samples = []
     threading.Thread(target=sample_spot, args=(end, samples), daemon=True).start()
     ptb = None; series = []; csamples = []
@@ -313,7 +317,7 @@ def watch(start, rows, vrows, lock):
                 v["note"] = "market not found"
             return
         ptb = m["ptb"]
-        poll_from = max([ENTRY_WINDOW, BOOK_WINDOW] + [w for _, w, _, _ in VARIANTS])
+        poll_from = max([ENTRY_WINDOW, BOOK_WINDOW] + [w for _, w, _, _, _ in VARIANTS])
         while time.time() < end - poll_from:
             time.sleep(min(1, max(0, end - poll_from - time.time())))
         if ptb is None:  # gamma sometimes fills priceToBeat late
@@ -347,7 +351,7 @@ def watch(start, rows, vrows, lock):
                         continue
                     if v.get("spot_at_window") is None:  # first poll inside this variant's window
                         v["spot_at_window"] = sp
-                    hit = evaluate(asks, v["min_price"], MAX_PRICE, SHARES)
+                    hit = evaluate(asks, v["min_price"], v["_max"], SHARES)
                     if hit and v["_filt"] is not None:
                         ref = chain_at_start if chain_at_start is not None else spot_at_start
                         dl = None if sp is None or ref is None else sp - ref
@@ -432,7 +436,7 @@ def vsummary(vrows, since):
     """One line per variant: entries / losses / pnl."""
     rs = [r for r in vrows if r.get("_t", 0) >= since] if since else vrows
     out = []
-    for n, _, _, _ in VARIANTS:
+    for n, _, _, _, _ in VARIANTS:
         vs = [r for r in rs if r["variant"] == n]; ent = [r for r in vs if r.get("entered")]
         done = [r for r in ent if r.get("won") in (0, 1)]
         out.append(f"{n}: 進 {len(ent)}/{len(vs)} 輸 {sum(1 for r in done if r['won'] == 0)} 損益 {sum(r.get('pnl', 0) or 0 for r in done):+.2f}")
@@ -443,9 +447,9 @@ def main():
     os.makedirs(DATA, exist_ok=True)
     rows, vrows, lock, seen = [], [], threading.Lock(), set()
     log(f"start: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s; "
-        f"variants {[n for n, _, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")
+        f"variants {[n for n, _, _, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")
     tg(f"🟢 BTC 5m 模擬 bot 啟動（不下單）\n規則：最後 {ENTRY_WINDOW} 秒，領先方賣價 {MIN_PRICE}~{MAX_PRICE} 就假想買 {SHARES:g} 股\n"
-       f"影子變體：{', '.join(n for n, _, _, _ in VARIANTS)}")
+       f"影子變體：{', '.join(n for n, _, _, _, _ in VARIANTS)}")
     last_hour = int(time.time() // 3600); last_day = datetime.now(TZ).date(); day_start = time.time()
     while True:
         now = time.time()
