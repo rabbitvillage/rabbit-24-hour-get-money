@@ -88,11 +88,17 @@ def log(*a):
 
 
 # ---------------- Telegram ----------------
+def chat_file():
+    return os.path.join(DATA, "tg_chat_id")
+
+
 def tg(text):
     global TG_CHAT
     if not TG_TOKEN:
         return
     try:
+        if not TG_CHAT and os.path.exists(chat_file()):   # Telegram forgets /start after 24h; remember the chat ourselves
+            TG_CHAT = open(chat_file()).read().strip()
         if not TG_CHAT:
             ups, _ = get(f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates")
             chats = [u.get("message", u.get("channel_post", {})).get("chat", {}).get("id") for u in ups.get("result", [])]
@@ -102,6 +108,10 @@ def tg(text):
                 return
             TG_CHAT = str(chats[-1])
             log("TG: using chat", TG_CHAT)
+            try:
+                os.makedirs(DATA, exist_ok=True); open(chat_file(), "w").write(TG_CHAT)
+            except OSError:
+                pass
         data = urllib.parse.urlencode({"chat_id": TG_CHAT, "text": text}).encode()
         urllib.request.urlopen(urllib.request.Request(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=data, headers=UA), timeout=10)
