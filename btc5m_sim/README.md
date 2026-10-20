@@ -18,6 +18,9 @@
 
 另外從收盤前 `SPOT_WINDOW`（預設同 `BOOK_WINDOW`＝150）秒起，每秒抓一次 BTC 現價（Coinbase 交易所即時買賣價中點，失敗改 Kraken 最後成交價），用來記錄：
 
+- 結算來源是 Chainlink **Data Streams** 的 BTC/USD 60 秒 TWAP（需付費憑證，拿不到）。免費最接近的是 Polygon 鏈上的 Chainlink BTC/USD 聚合器（`CHAIN_RPCS` 公開 RPC、`CHAIN_FEED` 合約），
+  約每 30 秒更新一次；每場寫進 `sim_chain.csv`，並記 `chain_at_start`（開盤時鏈上價，`_s` 變體的基準線）、`chain_ptb_err`、`chain_at_entry`、`chain_dist_at_entry`、`chain_age_at_entry`。
+- 欄位改變時程式會自動開新檔（`sim_variants_v2.csv`…），舊檔不動；push 腳本會把所有版本一起讀。
 - `spot_at_start`／`ptb_err`：開盤那一刻我們自己抓的現價，以及它和真正 priceToBeat 的差。
   gamma 的 priceToBeat **要到收盤後才會出現**，所以盤中只能用 `spot_at_start` 當基準價的替代值；`ptb_err` 告訴你這個替代值差多少。
   所有距離欄位都是結算後拿到 priceToBeat 再回填的。

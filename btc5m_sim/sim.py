@@ -32,6 +32,10 @@ TG_TOKEN = os.getenv("TG_TOKEN", "")
 TG_CHAT = os.getenv("TG_CHAT_ID", "")
 TZ = timezone(timedelta(hours=int(os.getenv("TZ_OFFSET", "8"))))
 FEE_RATE = 0.07
+# Chainlink BTC/USD aggregator on Polygon (public, no key). Polymarket resolves on the Chainlink BTC/USD 60s-TWAP *Data Stream*
+# (credentialed, off-chain); the on-chain aggregator is the closest free reference, updated on deviation/heartbeat, not every second.
+CHAIN_RPCS = [u for u in os.getenv("CHAIN_RPCS", "https://polygon-bor-rpc.publicnode.com,https://polygon.drpc.org").split(",") if u.strip()]
+CHAIN_FEED = os.getenv("CHAIN_FEED", "0xc907E116054Ad103354f2D350FD2514433D57F6f")
 BOOK_WINDOW = int(os.getenv("BOOK_WINDOW", "150"))    # record both sides' best ask every poll from this many seconds before close
 SPOT_WINDOW = int(os.getenv("SPOT_WINDOW", str(BOOK_WINDOW)))  # sample BTC spot from this many seconds before close
 TWAP_WINDOW = 60                                       # resolution = Chainlink TWAP of the last 60s
@@ -65,7 +69,10 @@ FIELDS = ["slug", "start_utc", "price_to_beat", "entered", "secs_left", "side", 
 VFIELDS = ["slug", "start_utc", "price_to_beat", "variant", "window", "min_price", "entered", "secs_left",
            "side", "ask", "ask_shares_le_max", "ask_usd_le_max", "other_side_ask", "fetch_ms", "cost", "fee",
            "spot_at_start", "ptb_err", "spot_at_window", "dist_at_window", "spot_at_entry", "dist_at_entry",
-           "twap_dist_at_entry", "min_abs_dist", "spot_samples", "winner", "won", "pnl", "note"]
+           "twap_dist_at_entry", "min_abs_dist", "spot_samples",
+           "chain_at_start", "chain_ptb_err", "chain_at_entry", "chain_dist_at_entry", "chain_age_at_entry", "chain_samples",
+           "winner", "won", "pnl", "note"]
+CFIELDS = ["slug", "secs_left", "price", "updated_at", "round_id"]  # sim_chain.csv: one row per on-chain feed update
 # one row per poll per market (sim_book.csv): the raw "curve" of both sides' best ask until close
 BFIELDS = ["slug", "secs_left", "up_ask", "up_sh", "up_usd", "down_ask", "down_sh", "down_usd", "spot", "fetch_ms"]
 
@@ -178,6 +185,36 @@ def sample_spot(end, samples):
         time.sleep(max(0, 1.0 - (time.time() - t0)))
 
 
+def chainlink():
+    """latestRoundData() of the on-chain feed -> (price, updated_at_unix, round_id) or (None, None, None)."""
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "eth_call",
+                       "params": [{"to": CHAIN_FEED, "data": "0xfeaf968c"}, "latest"]}).encode()
+    for rpc in CHAIN_RPCS:
+        try:
+            req = urllib.request.Request(rpc, data=body, headers={**UA, "content-type": "application/json"})
+            with urllib.request.urlopen(req, timeout=4) as r:
+                d = json.load(r)["result"][2:]
+            w = [int(d[i:i + 64], 16) for i in range(0, len(d), 64)]
+            return w[1] / 1e8, w[3], w[0]
+        except Exception:
+            continue
+    return None, None, None
+
+
+def sample_chain(end, csamples):
+    """Append (ts, price, updated_at, round_id) once a second from end-SPOT_WINDOW until close (only when the feed moved)."""
+    t = end - SPOT_WINDOW
+    while time.time() < t:
+        time.sleep(min(1, max(0, t - time.time())))
+    last = None
+    while time.time() < end:
+        t0 = time.time()
+        p, up, rid = chainlink()
+        if p is not None and up != last:
+            csamples.append((t0, p, up, rid)); last = up
+        time.sleep(max(0, 1.0 - (time.time() - t0)))
+
+
 def latest(samples):
     return samples[-1][1] if samples else None
 
@@ -197,6 +234,13 @@ def min_abs_dist(samples, ptb):
     return None if not samples or ptb is None else round(min(abs(p - ptb) for _, p in samples), 2)
 
 
+def finalize_chain(v, csamples, ptb, chain_at_start):
+    v["chain_at_start"] = chain_at_start
+    v["chain_ptb_err"] = dist(chain_at_start, ptb)
+    v["chain_dist_at_entry"] = dist(v.get("chain_at_entry"), ptb)
+    v["chain_samples"] = len(csamples)
+
+
 def finalize_dists(v, samples, end, ptb, spot_at_start):
     """gamma only publishes priceToBeat after close, so every distance is back-filled once ptb is known.
     spot_at_start is our own spot sample at market open: a live proxy for ptb; ptb_err shows how good it is."""
@@ -210,7 +254,19 @@ def finalize_dists(v, samples, end, ptb, spot_at_start):
 
 
 # ---------------- csv ----------------
+def versioned_path(path, fields):
+    """If `path` exists with a different header, return the next free <name>_vN.csv so old files stay readable."""
+    base, ext = os.path.splitext(path); n = 1
+    while os.path.exists(path):
+        with open(path, newline="") as f:
+            if next(csv.reader(f), None) == fields:
+                return path
+        n += 1; path = f"{base}_v{n}{ext}"
+    return path
+
+
 def append_rows(path, fields, rows):
+    path = versioned_path(path, fields)
     new = not os.path.exists(path)
     with open(path, "a", newline="") as f:
         w = csv.DictWriter(f, fields)
@@ -228,8 +284,10 @@ def watch(start, rows, vrows, lock):
     vstate = {n: dict(base, variant=n, window=w, min_price=p, entered=0, note="", _filt=fl) for n, w, p, fl in VARIANTS}
     samples = []
     threading.Thread(target=sample_spot, args=(end, samples), daemon=True).start()
-    ptb = None; series = []
-    spot_at_start = spot()  # proxy for priceToBeat (Chainlink at open), which gamma publishes only after close
+    ptb = None; series = []; csamples = []
+    threading.Thread(target=sample_chain, args=(end, csamples), daemon=True).start()
+    spot_at_start = spot()
+    chain_at_start, chain_up_at_start, _ = chainlink()   # the line, as the oracle saw it at open (closest free proxy for priceToBeat)  # proxy for priceToBeat (Chainlink at open), which gamma publishes only after close
     try:
         m = None
         while m is None and time.time() < end - LAST_ENTRY:
@@ -281,12 +339,15 @@ def watch(start, rows, vrows, lock):
                         v["spot_at_window"] = sp
                     hit = evaluate(asks, v["min_price"], MAX_PRICE, SHARES)
                     if hit and v["_filt"] is not None:
-                        dl = None if sp is None or spot_at_start is None else sp - spot_at_start
+                        ref = chain_at_start if chain_at_start is not None else spot_at_start
+                        dl = None if sp is None or ref is None else sp - ref
                         if not dist_ok(m["outcomes"][hit[0]], dl, v["_filt"]):
                             hit = None
                     if hit:
                         fill(v, hit, m["outcomes"], asks, secs_left, ms)
                         v["spot_at_entry"] = sp
+                        if csamples:
+                            v["chain_at_entry"] = csamples[-1][1]; v["chain_age_at_entry"] = round(now - csamples[-1][2])
                         del pending[name]
             except Exception as e:
                 row["note"] = f"book error {type(e).__name__}"
@@ -321,7 +382,7 @@ def watch(start, rows, vrows, lock):
     finally:
         row["_t"] = time.time()
         for v in vstate.values():
-            v["_t"] = row["_t"]; finalize_dists(v, samples, end, ptb, spot_at_start)
+            v["_t"] = row["_t"]; finalize_dists(v, samples, end, ptb, spot_at_start); finalize_chain(v, csamples, ptb, chain_at_start)
         with lock:
             rows.append(row); vrows.extend(vstate.values())
             append_rows(os.path.join(DATA, "sim_trades.csv"), FIELDS, [row])
@@ -329,6 +390,9 @@ def watch(start, rows, vrows, lock):
                 append_rows(os.path.join(DATA, "sim_variants.csv"), VFIELDS, vstate.values())
             if series:
                 append_rows(os.path.join(DATA, "sim_book.csv"), BFIELDS, series)
+            if csamples:
+                append_rows(os.path.join(DATA, "sim_chain.csv"), CFIELDS,
+                            [dict(slug=row["slug"], secs_left=round(end - ts, 1), price=p, updated_at=up, round_id=rid) for ts, p, up, rid in csamples])
         if row.get("entered"):
             log(f"{row['slug']} buy {row['side']} @{row['ask']} ({row['secs_left']}s left, {row['ask_usd_le_max']}$ on book) -> {row.get('winner')} pnl {row.get('pnl')}")
             if row.get("won") == 0:
@@ -338,7 +402,7 @@ def watch(start, rows, vrows, lock):
         if vstate:
             log(f"{row['slug']} variants " + " ".join(
                 f"{n}={'@'+str(v['ask'])+'/'+str(v['secs_left'])+'s' if v['entered'] else '-'}" for n, v in vstate.items())
-                + f" | min|spot-ptb| {vstate[next(iter(vstate))]['min_abs_dist']} ({len(samples)} samples)")
+                + f" | min|spot-ptb| {vstate[next(iter(vstate))]['min_abs_dist']} ({len(samples)} samples) | chain open-ptb {vstate[next(iter(vstate))]['chain_ptb_err']} ({len(csamples)} updates)")
 
 
 # ---------------- summaries ----------------

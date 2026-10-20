@@ -78,6 +78,26 @@ class SpotDistance(unittest.TestCase):
         self.assertIsNone(sim.min_abs_dist([], 100.0))
 
 
+class ChainFields(unittest.TestCase):
+    def test_finalize_chain(self):
+        v = dict(chain_at_entry=81580.0)
+        sim.finalize_chain(v, [(1, 81570.0, 100, 1), (2, 81575.0, 130, 2)], 81586.5, 81570.0)
+        self.assertEqual((v["chain_at_start"], v["chain_ptb_err"], v["chain_dist_at_entry"], v["chain_samples"]), (81570.0, -16.5, -6.5, 2))
+        nv = {}; sim.finalize_chain(nv, [], None, None)
+        self.assertEqual((nv["chain_ptb_err"], nv["chain_dist_at_entry"], nv["chain_samples"]), (None, None, 0))
+
+    def test_versioned_path_rotates_on_header_change(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "v.csv")
+            sim.append_rows(p, ["a", "b"], [{"a": 1, "b": 2}])
+            self.assertEqual(sim.versioned_path(p, ["a", "b"]), p)                      # same header: keep appending
+            p2 = sim.versioned_path(p, ["a", "b", "c"]); self.assertTrue(p2.endswith("v_v2.csv"))
+            sim.append_rows(p, ["a", "b", "c"], [{"a": 1, "b": 2, "c": 3}])            # lands in v_v2.csv
+            with open(p) as f: self.assertEqual(f.readline().strip(), "a,b")
+            with open(p2) as f: self.assertEqual(f.readline().strip(), "a,b,c")
+            self.assertEqual(sim.versioned_path(p, ["a", "b", "c"]), p2)               # reuses v2 next time
+
+
 class CsvWriter(unittest.TestCase):
     def test_append_rows_header_once_and_none_blank(self):
         with tempfile.TemporaryDirectory() as d:

@@ -83,7 +83,8 @@ function sanitize(p) {
   for (const k of ["markets", "never", "before_102", "s60_102", "s45_60", "s30_45", "under_30", "vanish_median", "with_98", "first98_median", "secs98_median"]) out.vanish[k] = num(vz[k]);
   const d = p.distance && typeof p.distance === "object" ? p.distance : {};
   out.distance = { samples: num(d.samples), ptb_err_median: num(d.ptb_err_median), ptb_err_p90: num(d.ptb_err_p90),
-    min_abs_dist_median: num(d.min_abs_dist_median), entries_with_dist: num(d.entries_with_dist) };
+    min_abs_dist_median: num(d.min_abs_dist_median), entries_with_dist: num(d.entries_with_dist),
+    chain_err_median: num(d.chain_err_median), chain_err_p90: num(d.chain_err_p90), chain_markets: num(d.chain_markets) };
   return out;
 }
 
@@ -141,7 +142,7 @@ function render(s) {
 <h2>主規則 <small>${esc(s.rule)}</small></h2>
 <div class="table-wrap"><table><thead><tr><th></th><th>場次</th><th>可進場</th><th>已結算</th><th>輸</th><th>模擬損益</th><th>每筆平均</th><th>98~99¢ 賣單中位數</th></tr></thead>
 <tbody>${statsRow("最近 24 小時", s.last24h)}${statsRow("累計", s.all)}</tbody></table></div>
-<h2>影子變體 <small>同一場盤、不同進場規則（w = 最後幾秒開始找，p = 最低買價，_s = 現價要站在買的那一邊，_s10／_s20／_s30 = 且離開盤價 ≥10／20／30 美元）</small></h2>
+<h2>影子變體 <small>同一場盤、不同進場規則（w = 最後幾秒開始找，p = 最低買價，_s = 現價要站在買的那一邊，_s10／_s20／_s30 = 且離基準線 ≥10／20／30 美元；基準線用鏈上 Chainlink 開盤價，讀不到才用 Coinbase 開盤價）</small></h2>
 <div class="table-wrap"><table><thead><tr><th>變體</th><th>場次</th><th>可進場</th><th>已結算</th><th>輸</th><th>模擬損益</th><th>每筆平均</th><th>賣單中位數</th></tr></thead>
 <tbody>${s.variants.map((v) => statsRow(v.name, v)).join("")}</tbody></table></div>
 <h2>最後 150 秒的訂單簿曲線 <small>每秒取樣；虛線 = 剩 102 秒（人工觀察的賣單消失點）與剩 45 秒（進場窗口）；最近 2 天</small></h2>
@@ -160,6 +161,7 @@ function render(s) {
 <div class="table-wrap"><table class="kv"><tbody>
 <tr><th>有現價樣本的場次</th><td>${n(s.distance.samples)}</td><th>開盤現價 vs 基準價誤差（中位數 / P90，美元）</th><td>${n(s.distance.ptb_err_median, 2)} / ${n(s.distance.ptb_err_p90, 2)}</td></tr>
 <tr><th>最後 60 秒最接近基準價（中位數，美元）</th><td>${n(s.distance.min_abs_dist_median, 2)}</td><th>已有距離資料的進場</th><td>${n(s.distance.entries_with_dist)}</td></tr>
+<tr><th>鏈上 Chainlink 開盤價 vs 基準價誤差（中位數 / P90，美元）</th><td>${n(s.distance.chain_err_median, 2)} / ${n(s.distance.chain_err_p90, 2)}</td><th>有鏈上資料的場次</th><td>${n(s.distance.chain_markets)}</td></tr>
 </tbody></table></div>
 <h2>最近進場（主規則）</h2>
 <div class="table-wrap"><table><thead><tr><th>時間（UTC）</th><th>場</th><th>邊</th><th>價</th><th>剩秒</th><th>賣單深度</th><th>結果</th><th>損益</th></tr></thead>
