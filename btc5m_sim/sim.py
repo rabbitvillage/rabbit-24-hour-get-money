@@ -454,7 +454,8 @@ def main():
     exec_mode = live.init(notify=tg, log=log)
     log(f"start: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s; "
         f"variants {[n for n, _, _, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")
-    tg(f"🟢 BTC 5m 模擬 bot 啟動（不下單）\n規則：最後 {ENTRY_WINDOW} 秒，領先方賣價 {MIN_PRICE}~{MAX_PRICE} 就假想買 {SHARES:g} 股\n"
+    tg((f"🔴 BTC 5m bot 啟動：真單模式（會真的下單）" if exec_mode == "live" else f"🟢 BTC 5m 模擬 bot 啟動（{'dry：算好單但不送' if exec_mode == 'dry' else '不下單'}）")
+       + f"\n規則：最後 {ENTRY_WINDOW} 秒，領先方賣價 {MIN_PRICE}~{MAX_PRICE} 就買 {SHARES:g} 股\n"
        f"影子變體：{', '.join(n for n, _, _, _, _ in VARIANTS)}\n下單模式：{exec_mode}" + ("（真單！）" if exec_mode == "live" else "（不送單）"))
     last_hour = int(time.time() // 3600); last_day = datetime.now(TZ).date(); day_start = time.time()
     while True:
