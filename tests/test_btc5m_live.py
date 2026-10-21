@@ -110,11 +110,11 @@ class DryAndSettle(unittest.TestCase):
 class ProxyRouting(unittest.TestCase):
     def test_only_authenticated_calls_use_the_proxy(self):
         live.ORDER_PROXY = "http://127.0.0.1:10809"
-        proxied = [h for h in live._opener(True).handlers if isinstance(h, urllib.request.ProxyHandler)][0]
-        direct = [h for h in live._opener(False).handlers if isinstance(h, urllib.request.ProxyHandler)][0]
-        self.assertEqual(proxied.proxies.get("https"), "http://127.0.0.1:10809"); self.assertEqual(direct.proxies, {})
+        def proxies(opener): return {k: v for h in opener.handlers for k, v in getattr(h, "proxies", {}).items()}
+        self.assertEqual(proxies(live._opener(True)).get("https"), "http://127.0.0.1:10809")
+        self.assertEqual(proxies(live._opener(False)), {})
         live.ORDER_PROXY = ""
-        self.assertEqual([h for h in live._opener(True).handlers if isinstance(h, urllib.request.ProxyHandler)][0].proxies, {})
+        self.assertEqual(proxies(live._opener(True)), {})
 
 
 class WireFormat(unittest.TestCase):
