@@ -12,7 +12,7 @@ Per-rule accounting (data/live_results.csv) and stops:
   - if KILL_FILE exists, every rule stops (manual kill switch:  touch data/STOP)
 Secrets (signer token, CLOB L2 credentials) live only in btc5m_sim/.live.env (0600). The private key is never on this host.
 """
-import base64, csv, hashlib, hmac, json, os, threading, time, urllib.request
+import base64, csv, hashlib, hmac, json, os, threading, time, urllib.error, urllib.request
 from datetime import datetime, timezone, timedelta
 
 MODE = os.getenv("EXEC_MODE", "off").strip().lower()
@@ -33,9 +33,13 @@ SIGNER_TOKEN = os.getenv("SIGNER_TOKEN", "")
 SIGNER_ADDRESS = os.getenv("SIGNER_ADDRESS", "")             # EOA that signs (POLY_ADDRESS header)
 API_KEY = os.getenv("CLOB_API_KEY", ""); API_SECRET = os.getenv("CLOB_API_SECRET", ""); API_PASSPHRASE = os.getenv("CLOB_API_PASSPHRASE", "")
 DEFAULT_TICK = os.getenv("LIVE_TICK", "0.001")
+GAMMA = "https://gamma-api.polymarket.com/events?slug={}"
+ZERO32 = "0x" + "0" * 64
 UA = {"User-Agent": "btc5m-live"}
+LIVE_ENV = os.getenv("LIVE_ENV_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".live.env"))
+_ident = {}      # {"address": EOA, "proxyWallet": maker} from btc5m_whoami, fetched once
 
-OFIELDS = ["ts", "mode", "variant", "slug", "outcome", "token_id", "ask", "price", "size", "tick", "fee_bps",
+OFIELDS = ["ts", "mode", "variant", "slug", "outcome", "token_id", "ask", "price", "size", "tick", "neg_risk",
            "order_type", "status", "order_id", "filled_size", "cost", "secs_left", "msg"]
 RFIELDS = ["ts", "variant", "slug", "outcome", "size", "cost", "fee", "winner", "won", "pnl", "day"]
 
@@ -96,11 +100,71 @@ def tick_round(price, tick):
     return round(n * t, 6)
 
 
-def amounts(price, size):
-    """USDC maker amount and token taker amount in 6-decimal integers (BUY)."""
-    taker = int(round(size * 1e6))                     # tokens we receive
-    maker = int(round(size * price * 1e6))             # USDC we pay
-    return maker, taker
+def amounts(price, size, tick=DEFAULT_TICK):
+    """V2 market BUY (FOK): makerAmount = USDC to the cent (the venue rejects finer), takerAmount = shares derived
+    from it, truncated to tick_decimals + 2 places. Returns (maker_usdc_6dp, taker_shares_6dp, shares_float, usdc_float)."""
+    usdc = int(size * price * 100 + 1e-9) / 100.0     # floor to cents
+    dec = len(str(tick).split(".")[1]) if "." in str(tick) else 0
+    scale = 10 ** (dec + 2)
+    shares = int(usdc / price * scale + 1e-9) / scale  # truncate
+    return int(round(usdc * 1e6)), int(round(shares * 1e6)), shares, usdc
+
+
+def new_salt():
+    return int.from_bytes(os.urandom(7), "big") & ((1 << 53) - 1)   # fits a JS safe integer, like the SDK
+
+
+def worker(op, payload=None, timeout=8):
+    """POST one op to the signer Worker. Never logs the token."""
+    body = json.dumps({"op": op, **(payload or {})})
+    req = urllib.request.Request(SIGNER_URL, data=body.encode(), method="POST",
+                                 headers={**UA, "content-type": "application/json", "authorization": f"Bearer {SIGNER_TOKEN}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        try: return e.code, json.load(e)
+        except Exception: return e.code, {"ok": False, "reason": f"http {e.code}"}
+
+
+def identity():
+    """EOA + proxy wallet from the Worker (cached). Public addresses, no secrets."""
+    if not _ident:
+        st, d = worker("btc5m_whoami")
+        if st != 200 or not d.get("ok"): raise RuntimeError(f"whoami {st} {str(d)[:100]}")
+        _ident.update(address=d["address"], proxyWallet=d["proxyWallet"])
+    return _ident
+
+
+def l1_headers(timestamp, nonce=0):
+    """L1 headers for /auth/derive-api-key: the Worker signs the ClobAuth EIP-712 message; the key never leaves it."""
+    st, d = worker("btc5m_auth", {"timestamp": str(timestamp), "nonce": nonce})
+    if st != 200 or not d.get("ok"): raise RuntimeError(f"auth {st} {str(d)[:100]}")
+    return {"POLY_ADDRESS": d["address"], "POLY_SIGNATURE": d["signature"], "POLY_TIMESTAMP": str(timestamp), "POLY_NONCE": str(nonce)}
+
+
+def derive_l2():
+    """GET /auth/derive-api-key with Worker-signed L1 headers -> (key, secret, passphrase, address). Values are never printed."""
+    ts = int(time.time())
+    h = l1_headers(ts)
+    req = urllib.request.Request(f"{CLOB}/auth/derive-api-key", headers={**UA, **h})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        d = json.load(r)
+    key = d.get("apiKey") or d.get("api_key"); sec = d.get("secret"); pw = d.get("passphrase")
+    if not (key and sec and pw): raise RuntimeError("derive-api-key: unexpected response shape")
+    return key, sec, pw, h["POLY_ADDRESS"]
+
+
+def write_live_env(key, sec, pw, address):
+    """Write/refresh btc5m_sim/.live.env (0600) in place, keeping other lines. Never echoes values."""
+    lines = []
+    if os.path.exists(LIVE_ENV):
+        with open(LIVE_ENV) as f: lines = [l.rstrip("\n") for l in f]
+    vals = {"CLOB_API_KEY": key, "CLOB_API_SECRET": sec, "CLOB_API_PASSPHRASE": pw, "SIGNER_ADDRESS": address}
+    out = [l for l in lines if not any(l.startswith(k + "=") for k in vals)] + [f"{k}={v}" for k, v in vals.items()]
+    fd = os.open(LIVE_ENV, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f: f.write("\n".join(out) + "\n")
+    os.chmod(LIVE_ENV, 0o600)
 
 
 def l2_headers(method, path, body_str):
@@ -117,8 +181,12 @@ def _get(url, timeout=6):
 
 def _post(url, body_str, headers, timeout=10):
     req = urllib.request.Request(url, data=body_str.encode(), method="POST", headers={**UA, "content-type": "application/json", **headers})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.status, json.load(r)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        try: return e.code, json.load(e)
+        except Exception: return e.code, {"success": False, "errorMsg": f"http {e.code}"}
 
 
 def _append(name, fields, row):
@@ -139,42 +207,51 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
     slug = market["slug"]; outcome = market["outcomes"][side_idx]; token = market["tokens"][side_idx]
     price = min(PRICE_MAX, round(ask + SLIP, 3)); size = LIVE_SHARES
     row = dict(ts=datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"), mode=mode, variant=variant, slug=slug, outcome=outcome, token_id=token,
-               ask=ask, price=price, size=size, tick=DEFAULT_TICK, fee_bps="", order_type="FOK", status="", order_id="", filled_size=0, cost=0,
-               secs_left=secs_left, msg="")
+               ask=ask, price=price, size=size, tick=DEFAULT_TICK, neg_risk=market.get("negRisk", ""), order_type="FOK", status="", order_id="",
+               filled_size=0, cost=0, secs_left=secs_left, msg="")
     with _lock:
         ok, why = guard(variant, slug, price, size, mode)
         if not ok:
             row["status"] = "skipped"; row["msg"] = why; _append("live_orders.csv", OFIELDS, row); _log(f"live skip {variant} {slug} {outcome}@{price}: {why}"); return row
         _orders[(variant, slug)] = row   # reserve the slot before any network call
     try:
+        tick = DEFAULT_TICK
         if mode == "live":
             tick = str(_get(f"{CLOB}/tick-size?token_id={token}").get("minimum_tick_size", DEFAULT_TICK))
-            fee = int((_get(f"{CLOB}/fee-rate?token_id={token}") or {}).get("base_fee") or 0)
-            row["tick"] = tick; row["fee_bps"] = fee; row["price"] = price = tick_round(price, tick)
-        maker, taker = amounts(price, size)
-        intent = dict(slug=slug, token_id=token, outcome=outcome, side="BUY", price=price, size=size, maker_amount=str(maker), taker_amount=str(taker),
-                      fee_rate_bps=str(row["fee_bps"] or 0), tick=row["tick"], variant=variant, secs_left=secs_left, dry=(mode != "live"))
+            row["tick"] = tick; row["price"] = price = tick_round(price, tick)
+        maker, taker, shares, usdc = amounts(price, size, tick)
+        row["size"] = shares; row["cost"] = usdc
         if mode != "live":
-            row["status"] = "dry"; row["cost"] = round(price * size, 4); row["msg"] = "not sent"
-            _log(f"live DRY {variant} {slug} BUY {outcome} {size:g}@{price} (ask {ask}, {secs_left}s)")
+            row["status"] = "dry"; row["msg"] = f"not sent; would post FOK BUY {shares} sh for ${usdc:.2f}"
+            _log(f"live DRY {variant} {slug} BUY {outcome} {shares}@{price} ${usdc:.2f} (ask {ask}, {secs_left}s)")
             return row
-        # 1) signer Worker builds + signs the order (it re-validates the whitelist and knows maker/signer)
-        st, signed = _post(SIGNER_URL, json.dumps(intent), {"authorization": f"Bearer {SIGNER_TOKEN}"})
-        if st != 200 or not signed.get("order"):
-            row["status"] = "rejected"; row["msg"] = f"signer {st} {str(signed)[:120]}"; raise RuntimeError(row["msg"])
-        # 2) POST /order with L2 headers; the body string is what we sign and exactly what we send
-        body = json.dumps({"order": signed["order"], "owner": API_KEY, "orderType": "FOK", "postOnly": False})
+        ident = identity()
+        neg_risk = bool(market.get("negRisk", False))
+        order = dict(salt=new_salt(), maker=ident["proxyWallet"], signer=ident["address"], tokenId=str(token),
+                     makerAmount=str(maker), takerAmount=str(taker), side=0, signatureType=1,
+                     timestamp=str(int(time.time() * 1000)), metadata=ZERO32, builder=ZERO32, negRisk=neg_risk)
+        # 1) the Worker re-validates (market, side, price, size, identity, daily cap) and signs; the key never leaves it
+        st, signed = worker("btc5m_order", {"order": order, "idempotencyKey": f"{variant}:{slug}", "dry": False})
+        if st != 200 or not signed.get("ok") or not signed.get("signature"):
+            row["status"] = "rejected"; row["msg"] = f"signer {st} {str(signed.get('reason') or signed)[:140]}"; raise RuntimeError(row["msg"])
+        wire = dict(salt=order["salt"], maker=order["maker"], signer=order["signer"], tokenId=order["tokenId"],
+                    makerAmount=order["makerAmount"], takerAmount=order["takerAmount"], side="BUY", expiration="0",
+                    signatureType=1, timestamp=order["timestamp"], metadata=ZERO32, builder=ZERO32, signature=signed["signature"])
+        # 2) POST /order with L2 headers; the body string we sign is exactly the one we send
+        body = json.dumps({"order": wire, "orderType": "FOK", "owner": API_KEY})
         st, resp = _post(f"{CLOB}/order", body, l2_headers("POST", "/order", body))
-        row["order_id"] = str(resp.get("orderID") or resp.get("orderId") or ""); status = str(resp.get("status") or "")
-        if resp.get("success") and status.lower() in ("matched", "filled"):
-            row["status"] = "filled"; row["filled_size"] = size; row["cost"] = round(price * size, 4)
+        row["order_id"] = str(resp.get("orderID") or ""); status = str(resp.get("status") or "").lower()
+        try: taking = float(resp.get("takingAmount") or 0)
+        except (TypeError, ValueError): taking = 0.0
+        if resp.get("success") and status == "matched":
+            row["status"] = "filled"; row["filled_size"] = taking or shares; row["cost"] = usdc
         elif resp.get("success"):
             row["status"] = "unfilled"; row["msg"] = status
         else:
             row["status"] = "rejected"; row["msg"] = str(resp.get("errorMsg") or resp)[:160]
-        row["msg"] = (row["msg"] + " " + str(resp)[:200]).strip()
-        _log(f"live {row['status']} {variant} {slug} BUY {outcome} {size:g}@{price} id={row['order_id']} {row['msg'][:80]}")
-        _notify(f"{'✅' if row['status']=='filled' else '⚠️'} 真單 {row['status']} {variant}\n{slug} 買 {outcome} {size:g} 股 @{price}（剩 {secs_left}s）")
+        row["msg"] = (row["msg"] + " " + str({k: resp.get(k) for k in ("status", "makingAmount", "takingAmount", "errorMsg")})).strip()
+        _log(f"live {row['status']} {variant} {slug} BUY {outcome} {shares}@{price} id={row['order_id'][:12]} {row['msg'][:90]}")
+        _notify(f"{'✅' if row['status']=='filled' else '⚠️'} 真單 {row['status']} {variant}\n{slug} 買 {outcome} {shares:g} 股 @{price}（${usdc:.2f}，剩 {secs_left}s）")
         return row
     except Exception as e:
         row["status"] = row["status"] or "error"; row["msg"] = (row["msg"] + " " + type(e).__name__ + " " + str(e)[:120]).strip()
@@ -191,16 +268,15 @@ def settle(slug, winner):
     with _lock:
         for (variant, s), row in list(_orders.items()):
             if s != slug or row.get("status") not in ("filled", "dry"): continue
-            size = float(row["filled_size"] or row["size"]); price = float(row["price"]); cost = round(price * size, 4)
-            fee = round((float(row["fee_bps"] or 0) / 10000) * price * (1 - price) * size, 5)
-            won = int(row["outcome"] == winner); pnl = round((size if won else 0) - cost - fee, 4)
+            size = float(row["filled_size"] or row["size"]); cost = float(row["cost"] or 0); fee = 0.0   # V2 taker fee is already inside the fill
+            won = int(row["outcome"] == winner); pnl = round((size if won else 0) - cost, 4)
             if row["status"] == "filled":                      # dry orders are not booked into the stops
                 _daily.setdefault(day, {}); _daily[day][variant] = _daily[day].get(variant, 0.0) + pnl
             _append("live_results.csv", RFIELDS, dict(ts=datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"), variant=variant, slug=slug, outcome=row["outcome"],
                                                      size=size, cost=cost, fee=fee, winner=winner, won=won, pnl=pnl, day=day))
             _log(f"live settle {row['status']} {variant} {slug} {row['outcome']} -> {winner} pnl {pnl:+.4f}")
             if row["status"] == "filled":
-                if not won: _notify(f"❌ 真單輸 {variant} {slug}\n買 {row['outcome']} @{price}，結果 {winner}，{pnl:+.2f}")
+                if not won: _notify(f"❌ 真單輸 {variant} {slug}\n買 {row['outcome']} @{row['price']}，結果 {winner}，{pnl:+.2f}")
                 if realised(variant) <= -MAX_DAILY_LOSS_VARIANT and variant not in _stopped:
                     _stopped.add(variant); trips.append(f"⛔ {variant} 今日虧 {realised(variant):+.2f}，已停到明天")
                 if realised() <= -MAX_DAILY_LOSS_TOTAL:
@@ -213,3 +289,24 @@ def summary(day=None):
     d = _daily.get(day or today(), {})
     if not d: return "真單：今日無已結算"
     return "真單今日：" + "｜".join(f"{k} {v:+.2f}" for k, v in sorted(d.items())) + f"｜合計 {sum(d.values()):+.2f}"
+
+
+if __name__ == "__main__":
+    import sys
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    if cmd == "whoami":
+        print(json.dumps(identity()))
+    elif cmd == "setup":            # derive L2 credentials through the Worker and write .live.env (0600); prints nothing secret
+        key, sec, pw, addr = derive_l2(); write_live_env(key, sec, pw, addr)
+        print(f"wrote {LIVE_ENV} (0600): signer address {addr}, api key {key[:8]}…")
+    elif cmd == "dry-sign":         # ask the Worker to validate (not sign) a sample order for the current market
+        start = int(time.time() // 300) * 300
+        ev = _get(GAMMA.format(start))[0]; m = ev["markets"][0]
+        tokens = json.loads(m["clobTokenIds"]); ident = identity()
+        maker, taker, shares, usdc = amounts(0.95, LIVE_SHARES)
+        order = dict(salt=new_salt(), maker=ident["proxyWallet"], signer=ident["address"], tokenId=str(tokens[0]), makerAmount=str(maker),
+                     takerAmount=str(taker), side=0, signatureType=1, timestamp=str(int(time.time() * 1000)), metadata=ZERO32, builder=ZERO32,
+                     negRisk=bool(m.get("negRisk", False)))
+        print(json.dumps(worker("btc5m_order", {"order": order, "idempotencyKey": f"dry:{start}:{int(time.time())}", "dry": True})[1]))
+    else:
+        print("usage: python3 -m btc5m_sim.live whoami|setup|dry-sign")

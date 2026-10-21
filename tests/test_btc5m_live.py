@@ -49,9 +49,13 @@ class Guards(unittest.TestCase):
 
 class Amounts(unittest.TestCase):
     def test_amounts_and_tick(self):
-        self.assertEqual(live.amounts(0.98, 5), (4900000, 5000000))
-        self.assertEqual(live.amounts(0.913, 5), (4565000, 5000000))
+        # V2 market BUY: USDC floored to cents, shares = usdc/price truncated to tick decimals + 2
+        self.assertEqual(live.amounts(0.98, 5, "0.001"), (4900000, 5000000, 5.0, 4.9))
+        self.assertEqual(live.amounts(0.96, 5, "0.001"), (4800000, 5000000, 5.0, 4.8))
+        maker, taker, shares, usdc = live.amounts(0.913, 5, "0.001")     # 5 x 0.913 = 4.565 -> $4.56 -> 4.99452 sh
+        self.assertEqual((maker, usdc), (4560000, 4.56)); self.assertEqual(shares, 4.99452); self.assertEqual(taker, 4994520)
         self.assertEqual(live.tick_round(0.9876, "0.001"), 0.988); self.assertEqual(live.tick_round(0.9876, "0.01"), 0.99)
+        self.assertLess(live.new_salt(), 2 ** 53)
 
     def test_l2_headers(self):
         live.API_SECRET = base64.urlsafe_b64encode(b"secret-bytes").decode(); live.API_KEY = "k"; live.API_PASSPHRASE = "p"; live.SIGNER_ADDRESS = "0xabc"
@@ -75,7 +79,7 @@ class DryAndSettle(unittest.TestCase):
 
     def test_dry_order_is_written_not_sent(self):
         row = live._submit("w45_p98_s", market(), 1, 0.98, 30.5, mode="dry")
-        self.assertEqual((row["status"], row["outcome"], row["price"], row["size"]), ("dry", "Down", 0.99, 5.0))   # ask + slip
+        self.assertEqual((row["status"], row["outcome"], row["price"], row["size"], row["cost"]), ("dry", "Down", 0.99, 5.0, 4.95))   # ask + slip
         o = self.rows("live_orders.csv"); self.assertEqual(len(o), 1); self.assertEqual(o[0]["status"], "dry"); self.assertEqual(o[0]["token_id"], "222")
         # second attempt on the same market by the same rule is skipped and recorded
         row2 = live._submit("w45_p98_s", market(), 1, 0.98, 20.0, mode="dry")
@@ -85,10 +89,10 @@ class DryAndSettle(unittest.TestCase):
     def test_settle_books_pnl_and_trips_stops(self):
         live._submit("w60_m95_s10", market(), 0, 0.80, 55.0, mode="dry")
         live._orders[("w60_m95_s10", market()["slug"])]["status"] = "filled"      # pretend the exchange filled it
-        live._orders[("w60_m95_s10", market()["slug"])]["filled_size"] = 5; live._orders[("w60_m95_s10", market()["slug"])]["fee_bps"] = 700
-        live.settle(market()["slug"], "Down")                                       # we bought Up at 0.81 -> lost
+        live._orders[("w60_m95_s10", market()["slug"])]["filled_size"] = 5
+        live.settle(market()["slug"], "Down")                                       # we bought Up at 0.81 -> lost the $4.05 paid
         r = self.rows("live_results.csv"); self.assertEqual(len(r), 1)
-        self.assertEqual((r[0]["won"], r[0]["outcome"]), ("0", "Up")); self.assertAlmostEqual(float(r[0]["pnl"]), -(0.81 * 5) - 0.07 * 0.81 * 0.19 * 5, 3)
+        self.assertEqual((r[0]["won"], r[0]["outcome"]), ("0", "Up")); self.assertAlmostEqual(float(r[0]["pnl"]), -4.05, 3)
         self.assertTrue(any("真單輸" in n for n in self.notes)); self.assertFalse(any("已停到明天" in n for n in self.notes))
         live._daily[live.today()]["w60_m95_s10"] = -14.9
         live._submit("w60_m95_s10", market("btc-updown-5m-2"), 0, 0.80, 55.0, mode="dry")
@@ -101,6 +105,18 @@ class DryAndSettle(unittest.TestCase):
     def test_dry_results_do_not_count_toward_stops(self):
         live._submit("main", market(), 0, 0.98, 30.0, mode="dry"); live.settle(market()["slug"], "Down")
         self.assertEqual(live.realised("main"), 0.0); self.assertEqual(len(self.rows("live_results.csv")), 1)
+
+
+class WireFormat(unittest.TestCase):
+    def test_live_env_writer_keeps_other_lines(self):
+        with tempfile.TemporaryDirectory() as d:
+            live.LIVE_ENV = os.path.join(d, ".live.env")
+            with open(live.LIVE_ENV, "w") as f: f.write("SIGNER_URL=https://x/\nSIGNER_TOKEN=t\nCLOB_API_KEY=old\n")
+            live.write_live_env("k1", "s1", "p1", "0xabc")
+            with open(live.LIVE_ENV) as f: lines = f.read().split()
+            self.assertEqual(oct(os.stat(live.LIVE_ENV).st_mode & 0o777), "0o600")
+            self.assertIn("SIGNER_URL=https://x/", lines); self.assertIn("CLOB_API_KEY=k1", lines); self.assertNotIn("CLOB_API_KEY=old", lines)
+            self.assertIn("SIGNER_ADDRESS=0xabc", lines)
 
 
 if __name__ == "__main__":
