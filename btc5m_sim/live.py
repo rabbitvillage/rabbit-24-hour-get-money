@@ -28,6 +28,10 @@ MAX_DAILY_LOSS_TOTAL = float(os.getenv("MAX_DAILY_LOSS_TOTAL", "50"))
 KILL_FILE = os.getenv("KILL_FILE", os.path.join(DATA, "STOP"))
 SLUG_PREFIX = "btc-updown-5m-"
 CLOB = os.getenv("CLOB_HOST", "https://clob.polymarket.com")
+# Polymarket refuses orders from US IPs (racknerd is in New York). Authenticated exchange calls (POST /order,
+# /auth/derive-api-key, /data/*) go through this HTTP proxy when set — on racknerd it is the local sing-box
+# inbound whose outbound exits in Sofia (BG, allowed). Market data (gamma, /book, /tick-size) stays direct for speed.
+ORDER_PROXY = os.getenv("ORDER_PROXY", "")
 SIGNER_URL = os.getenv("SIGNER_URL", "")                     # e.g. https://rcss-signer.../btc5m/sign
 SIGNER_TOKEN = os.getenv("SIGNER_TOKEN", "")
 SIGNER_ADDRESS = os.getenv("SIGNER_ADDRESS", "")             # EOA that signs (POLY_ADDRESS header)
@@ -63,7 +67,7 @@ def init(notify=None, log=None):
         with open(p, newline="") as f:
             for r in csv.DictReader(f):
                 _daily.setdefault(r["day"], {}); _daily[r["day"]][r["variant"]] = _daily[r["day"]].get(r["variant"], 0.0) + float(r["pnl"] or 0)
-    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} slip={SLIP} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} kill={KILL_FILE}"
+    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} slip={SLIP} proxy={ORDER_PROXY or 'direct'} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} kill={KILL_FILE}"
          + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all"))
     if MODE == "live" and not (SIGNER_URL and SIGNER_TOKEN and SIGNER_ADDRESS and API_KEY and API_SECRET and API_PASSPHRASE):
         _log("live: MISSING credentials -> falling back to dry")
@@ -147,9 +151,7 @@ def derive_l2():
     """GET /auth/derive-api-key with Worker-signed L1 headers -> (key, secret, passphrase, address). Values are never printed."""
     ts = int(time.time())
     h = l1_headers(ts)
-    req = urllib.request.Request(f"{CLOB}/auth/derive-api-key", headers={**UA, **h})
-    with urllib.request.urlopen(req, timeout=10) as r:
-        d = json.load(r)
+    d = _get(f"{CLOB}/auth/derive-api-key", timeout=12, headers=h, proxied=True)
     key = d.get("apiKey") or d.get("api_key"); sec = d.get("secret"); pw = d.get("passphrase")
     if not (key and sec and pw): raise RuntimeError("derive-api-key: unexpected response shape")
     return key, sec, pw, h["POLY_ADDRESS"]
@@ -174,15 +176,27 @@ def l2_headers(method, path, body_str):
     return {"POLY_ADDRESS": SIGNER_ADDRESS, "POLY_SIGNATURE": sig, "POLY_TIMESTAMP": ts, "POLY_API_KEY": API_KEY, "POLY_PASSPHRASE": API_PASSPHRASE}
 
 
-def _get(url, timeout=6):
-    with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=timeout) as r:
-        return json.load(r)
+def _opener(proxied):
+    """urllib opener; when `proxied` and ORDER_PROXY is set, route through the proxy (never for market data)."""
+    if proxied and ORDER_PROXY:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({"http": ORDER_PROXY, "https": ORDER_PROXY}))
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
-def _post(url, body_str, headers, timeout=10):
+def _get(url, timeout=6, headers=None, proxied=False):
+    req = urllib.request.Request(url, headers={**UA, **(headers or {})})
+    try:
+        with _opener(proxied).open(req, timeout=timeout) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        try: return json.load(e)
+        except Exception: raise
+
+
+def _post(url, body_str, headers, timeout=10, proxied=False):
     req = urllib.request.Request(url, data=body_str.encode(), method="POST", headers={**UA, "content-type": "application/json", **headers})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _opener(proxied).open(req, timeout=timeout) as r:
             return r.status, json.load(r)
     except urllib.error.HTTPError as e:
         try: return e.code, json.load(e)
@@ -239,7 +253,7 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
                     signatureType=1, timestamp=order["timestamp"], metadata=ZERO32, builder=ZERO32, signature=signed["signature"])
         # 2) POST /order with L2 headers; the body string we sign is exactly the one we send
         body = json.dumps({"order": wire, "orderType": "FOK", "owner": API_KEY})
-        st, resp = _post(f"{CLOB}/order", body, l2_headers("POST", "/order", body))
+        st, resp = _post(f"{CLOB}/order", body, l2_headers("POST", "/order", body), timeout=12, proxied=True)
         row["order_id"] = str(resp.get("orderID") or ""); status = str(resp.get("status") or "").lower()
         try: taking = float(resp.get("takingAmount") or 0)
         except (TypeError, ValueError): taking = 0.0
@@ -296,6 +310,9 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "whoami":
         print(json.dumps(identity()))
+    elif cmd == "region":           # is the exchange going to accept orders from where our authenticated calls exit?
+        g = _get("https://polymarket.com/api/geoblock", timeout=12, proxied=True)
+        print(json.dumps({"proxy": ORDER_PROXY or "(direct)", **g}))
     elif cmd == "setup":            # derive L2 credentials through the Worker and write .live.env (0600); prints nothing secret
         key, sec, pw, addr = derive_l2(); write_live_env(key, sec, pw, addr)
         print(f"wrote {LIVE_ENV} (0600): signer address {addr}, api key {key[:8]}…")

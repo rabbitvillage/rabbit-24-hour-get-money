@@ -1,5 +1,5 @@
 """Tests for the phase-1 executor: guards, ledger, stops, header signing. No network."""
-import base64, csv, hashlib, hmac, os, tempfile, unittest
+import base64, csv, hashlib, hmac, os, tempfile, unittest, urllib.request
 from importlib import reload
 
 os.environ["EXEC_MODE"] = "dry"
@@ -105,6 +105,16 @@ class DryAndSettle(unittest.TestCase):
     def test_dry_results_do_not_count_toward_stops(self):
         live._submit("main", market(), 0, 0.98, 30.0, mode="dry"); live.settle(market()["slug"], "Down")
         self.assertEqual(live.realised("main"), 0.0); self.assertEqual(len(self.rows("live_results.csv")), 1)
+
+
+class ProxyRouting(unittest.TestCase):
+    def test_only_authenticated_calls_use_the_proxy(self):
+        live.ORDER_PROXY = "http://127.0.0.1:10809"
+        proxied = [h for h in live._opener(True).handlers if isinstance(h, urllib.request.ProxyHandler)][0]
+        direct = [h for h in live._opener(False).handlers if isinstance(h, urllib.request.ProxyHandler)][0]
+        self.assertEqual(proxied.proxies.get("https"), "http://127.0.0.1:10809"); self.assertEqual(direct.proxies, {})
+        live.ORDER_PROXY = ""
+        self.assertEqual([h for h in live._opener(True).handlers if isinstance(h, urllib.request.ProxyHandler)][0].proxies, {})
 
 
 class WireFormat(unittest.TestCase):
