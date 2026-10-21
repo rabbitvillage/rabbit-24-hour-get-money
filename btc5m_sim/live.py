@@ -33,7 +33,7 @@ SIGNER_TOKEN = os.getenv("SIGNER_TOKEN", "")
 SIGNER_ADDRESS = os.getenv("SIGNER_ADDRESS", "")             # EOA that signs (POLY_ADDRESS header)
 API_KEY = os.getenv("CLOB_API_KEY", ""); API_SECRET = os.getenv("CLOB_API_SECRET", ""); API_PASSPHRASE = os.getenv("CLOB_API_PASSPHRASE", "")
 DEFAULT_TICK = os.getenv("LIVE_TICK", "0.001")
-GAMMA = "https://gamma-api.polymarket.com/events?slug={}"
+GAMMA = "https://gamma-api.polymarket.com/events?slug=btc-updown-5m-{}"
 ZERO32 = "0x" + "0" * 64
 UA = {"User-Agent": "btc5m-live"}
 LIVE_ENV = os.getenv("LIVE_ENV_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".live.env"))
