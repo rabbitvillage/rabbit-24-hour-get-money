@@ -3,6 +3,8 @@
 //   POST /api/push    -> store a snapshot; needs "Authorization: Bearer <PUSH_TOKEN>" (secret binding)
 // Everything else -> 404/405. All rendered text is HTML-escaped; numbers are coerced with Number().
 
+import { reportHtml } from "./report.js";
+
 const KEY = "latest";
 const MAX_BODY = 65536;
 const STALE_AFTER_S = 15 * 60;
@@ -23,6 +25,10 @@ export default {
       if (request.method !== "GET" && request.method !== "HEAD") return text(405, "method not allowed", { allow: "GET, HEAD" });
       const raw = await env.DASH.get(KEY);
       return html(render(raw ? safeParse(raw) : null));
+    }
+    if (url.pathname === "/report") {
+      if (request.method !== "GET" && request.method !== "HEAD") return text(405, "method not allowed", { allow: "GET, HEAD" });
+      return html(reportHtml());
     }
     if (url.pathname === "/api/push") {
       if (request.method !== "POST") return text(405, "method not allowed", { allow: "POST" });
