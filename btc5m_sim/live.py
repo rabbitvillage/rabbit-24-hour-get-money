@@ -67,12 +67,53 @@ def init(notify=None, log=None):
         with open(p, newline="") as f:
             for r in csv.DictReader(f):
                 _daily.setdefault(r["day"], {}); _daily[r["day"]][r["variant"]] = _daily[r["day"]].get(r["variant"], 0.0) + float(r["pnl"] or 0)
+    _recover_pending()
     _log(f"live: mode={MODE} shares={LIVE_SHARES:g} slip={SLIP} proxy={ORDER_PROXY or 'direct'} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} kill={KILL_FILE}"
          + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all"))
     if MODE == "live" and not (SIGNER_URL and SIGNER_TOKEN and SIGNER_ADDRESS and API_KEY and API_SECRET and API_PASSPHRASE):
         _log("live: MISSING credentials -> falling back to dry")
         return "dry"
     return MODE
+
+
+def _recover_pending():
+    """After a restart, filled orders whose market has not been booked yet are re-registered and settled by a
+    small poller, so restarts never lose real P&L (the sim only settles markets it watched itself)."""
+    op = os.path.join(DATA, "live_orders.csv"); rp = os.path.join(DATA, "live_results.csv")
+    if not os.path.exists(op): return
+    booked = set()
+    if os.path.exists(rp):
+        with open(rp, newline="") as f:
+            booked = {(r["variant"], r["slug"]) for r in csv.DictReader(f)}
+    pending = {}
+    with open(op, newline="") as f:
+        for r in csv.DictReader(f):
+            if r.get("mode") == "live" and r.get("status") == "filled" and (r["variant"], r["slug"]) not in booked:
+                pending[(r["variant"], r["slug"])] = r
+    if not pending: return
+    with _lock:
+        for k, r in pending.items():
+            _orders[k] = dict(r, filled_size=float(r["filled_size"] or 0), cost=float(r["cost"] or 0), size=float(r["size"] or 0), price=float(r["price"] or 0))
+    slugs = sorted({s for _, s in pending})
+    _log(f"live: recovering {len(pending)} filled order(s) on {len(slugs)} market(s) not yet settled: {slugs}")
+    for s in slugs:
+        threading.Thread(target=_settle_when_resolved, args=(s,), daemon=True).start()
+
+
+def _settle_when_resolved(slug):
+    start = int(slug.rsplit("-", 1)[-1])
+    for _ in range(80):                                   # up to ~40 min
+        try:
+            ev = _get(GAMMA.format(start), timeout=8)
+            if ev:
+                m = ev[0]["markets"][0]
+                if m.get("closed"):
+                    prices = json.loads(m["outcomePrices"]); outcomes = json.loads(m["outcomes"])
+                    settle(slug, outcomes[0] if float(prices[0]) > 0.5 else outcomes[1]); return
+        except Exception as e:
+            _log(f"live: recover {slug} poll error {type(e).__name__}")
+        time.sleep(30)
+    _log(f"live: recover {slug} gave up (unresolved after 40 min)")
 
 
 def today():
@@ -262,7 +303,8 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
         elif resp.get("success"):
             row["status"] = "unfilled"; row["msg"] = status
         else:
-            row["status"] = "rejected"; row["msg"] = str(resp.get("errorMsg") or resp)[:160]
+            err = str(resp.get("errorMsg") or resp.get("error") or resp)
+            row["status"] = "unfilled" if "fully filled" in err else "rejected"; row["msg"] = err[:160]
         row["msg"] = (row["msg"] + " " + str({k: resp.get(k) for k in ("status", "makingAmount", "takingAmount", "errorMsg")})).strip()
         _log(f"live {row['status']} {variant} {slug} BUY {outcome} {shares}@{price} id={row['order_id'][:12]} {row['msg'][:90]}")
         _notify(f"{'✅' if row['status']=='filled' else '⚠️'} 真單 {row['status']} {variant}\n{slug} 買 {outcome} {shares:g} 股 @{price}（${usdc:.2f}，剩 {secs_left}s）")

@@ -43,15 +43,19 @@ SPOT_WINDOW = int(os.getenv("SPOT_WINDOW", str(BOOK_WINDOW)))  # sample BTC spot
 TWAP_WINDOW = 60                                       # resolution = Chainlink TWAP of the last 60s
 
 
+M_FLOOR = float(os.getenv("M_FLOOR", "0.80"))   # price floor for 'm' (price-cap) variants: below this the "favourite" is a coin flip
+
+
 def parse_variant(s):
     """Variant spec -> (name, window_s, min_price, max_price, dist_filter):
        'w30_p98'      buy the favourite only at 0.98..MAX_PRICE in the last 30s (p = price floor, the original rule)
-       'w60_m95'      buy the favourite at ANY ask 0.50..0.95 in the last 60s (m = price cap: earlier, cheaper entries)
+       'w60_m95'      buy the favourite at any ask M_FLOOR(0.80)..0.95 in the last 60s (m = price cap: earlier, cheaper entries;
+                      2026-10-21: floor raised from 0.50 after a live loss at 0.55 — backtest: 0.50-0.70 entries lose 34%, 0.80-0.95 lose 8%)
        '..._s' / '..._s10'  distance filter: spot must favour the side we buy relative to the line (on-chain open price),
                      and |spot - line| >= 0 / 10 USD."""
     s = s.strip(); parts = s.split("_")
     w, pr = parts[0], parts[1]
-    lo, hi = (int(pr[1:]) / 100, MAX_PRICE) if pr.startswith("p") else (0.5, int(pr[1:]) / 100)
+    lo, hi = (int(pr[1:]) / 100, MAX_PRICE) if pr.startswith("p") else (M_FLOOR, int(pr[1:]) / 100)
     filt = None
     if len(parts) > 2 and parts[2].startswith("s"):
         filt = float(parts[2][1:] or 0)

@@ -117,6 +117,33 @@ class ProxyRouting(unittest.TestCase):
         self.assertEqual(proxies(live._opener(True)), {})
 
 
+class Recovery(unittest.TestCase):
+    def test_filled_unsettled_orders_are_reloaded_after_restart(self):
+        live._orders.clear(); live._daily.clear()
+        with tempfile.TemporaryDirectory() as d:
+            live.DATA = d; live._log = lambda *a: None
+            with open(os.path.join(d, "live_orders.csv"), "w") as f:
+                f.write(",".join(live.OFIELDS) + "\n")
+                f.write("2026-10-21 22:19:25,live,w45_p98,btc-updown-5m-1792593000,Down,222,0.98,0.99,5.0,0.001,False,FOK,filled,abc,5.15625,4.95,44.6,ok\n")
+                f.write("2026-10-21 22:19:25,live,w30_p98,btc-updown-5m-1792593000,Down,222,0.98,0.99,5.0,0.001,False,FOK,unfilled,,0,0,44.6,fok\n")
+                f.write("2026-10-21 22:14:25,live,main,btc-updown-5m-1792592700,Up,111,0.98,0.99,5.0,0.001,False,FOK,filled,def,5.0,4.95,40.0,ok\n")
+            with open(os.path.join(d, "live_results.csv"), "w") as f:
+                f.write(",".join(live.RFIELDS) + "\n")
+                f.write("2026-10-21 22:25:00,main,btc-updown-5m-1792592700,Up,5.0,4.95,0,Up,1,0.05,2026-10-21\n")   # already booked
+            started = []
+            orig = live.threading.Thread
+            class FakeThread:
+                def __init__(self, target=None, args=(), daemon=None): started.append(args)
+                def start(self): pass
+            live.threading.Thread = FakeThread
+            try: live._recover_pending()
+            finally: live.threading.Thread = orig
+            self.assertEqual(list(live._orders), [("w45_p98", "btc-updown-5m-1792593000")])     # filled + unbooked only
+            self.assertEqual(live._orders[("w45_p98", "btc-updown-5m-1792593000")]["filled_size"], 5.15625)
+            self.assertEqual(started, [("btc-updown-5m-1792593000",)])
+            live._orders.clear()
+
+
 class WireFormat(unittest.TestCase):
     def test_live_env_writer_keeps_other_lines(self):
         with tempfile.TemporaryDirectory() as d:

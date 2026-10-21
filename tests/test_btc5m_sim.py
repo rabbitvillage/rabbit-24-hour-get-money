@@ -10,12 +10,13 @@ class VariantParsing(unittest.TestCase):
         self.assertEqual(sim.parse_variant(" w45_p99 "), ("w45_p99", 45, 0.99, 0.99, None))
         self.assertEqual(sim.parse_variant("w45_p98_s"), ("w45_p98_s", 45, 0.98, 0.99, 0.0))
         self.assertEqual(sim.parse_variant("w45_p98_s10"), ("w45_p98_s10", 45, 0.98, 0.99, 10.0))
-        self.assertEqual(sim.parse_variant("w60_m95_s20"), ("w60_m95_s20", 60, 0.5, 0.95, 20.0))   # price cap: favourite at 50..95c
+        self.assertEqual(sim.parse_variant("w60_m95_s20"), ("w60_m95_s20", 60, 0.8, 0.95, 20.0))   # price cap: favourite at M_FLOOR(0.80)..95c
 
     def test_cap_variant_picks_favourite_only(self):
         asks = [(0.91, 300.0, 273.0), (0.10, 2000.0, 200.0)]
-        self.assertEqual(sim.evaluate(asks, 0.5, 0.95, 5), (0, 0.91, 300.0, 273.0))      # Up at 91c qualifies
-        self.assertIsNone(sim.evaluate([(0.97, 300.0, 291.0), (0.03, 10.0, 0.3)], 0.5, 0.95, 5))  # 97c is above the cap
+        self.assertEqual(sim.evaluate(asks, 0.8, 0.95, 5), (0, 0.91, 300.0, 273.0))      # Up at 91c qualifies
+        self.assertIsNone(sim.evaluate([(0.97, 300.0, 291.0), (0.03, 10.0, 0.3)], 0.8, 0.95, 5))  # 97c is above the cap
+        self.assertIsNone(sim.evaluate([(0.55, 300.0, 165.0), (0.44, 300.0, 132.0)], 0.8, 0.95, 5))  # 55c "favourite" is a coin flip: below the floor
 
     def test_defaults(self):
         names = [n for n, _, _, _, _ in sim.VARIANTS]
