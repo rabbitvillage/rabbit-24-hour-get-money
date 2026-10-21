@@ -51,3 +51,13 @@ Telegram 每小時／每日摘要會多一段各變體的進場數、輸的筆�
 ## 本機直接跑
 
     set -a; . btc5m_sim/.env; set +a; python3 -m btc5m_sim.sim
+
+## 階段 1：下單模組（`live.py`）
+
+`EXEC_MODE=off`（預設，純模擬）／`dry`（每一筆該下的單都走完所有檢查、寫進 `data/live_orders.csv`，狀態 `dry`，什麼都不送出）／`live`（真單：意圖送到簽名 Worker 簽名 → 以 FOK『不能全成交就取消』送到 CLOB）。
+
+- 每條規則（`main` ＋ 每個影子變體）各自記帳：`data/live_results.csv`。同一條規則同一場只試一次。
+- 停損：單條規則今日已結算虧損 ≤ −15 美元就停到明天；全部合計 ≤ −50 全停；`touch data/STOP` 立刻全停（已成交的照常結算）。
+- 真單需要的憑證只放 `btc5m_sim/.live.env`（0600、git 忽略）：`SIGNER_URL`、`SIGNER_TOKEN`、`SIGNER_ADDRESS`、`CLOB_API_KEY`／`SECRET`／`PASSPHRASE`。**私鑰不在主機**，在 Worker。
+- 成交率怎麼看：`live_orders.csv` 的 `status` 欄：`filled`／`unfilled`（FOK 沒吃到）／`rejected`／`error`／`skipped`（被停損或其他檢查擋下，`msg` 寫原因）／`dry`。
+- Worker 路由規格：`SIGNER_ROUTE_SPEC.md`。

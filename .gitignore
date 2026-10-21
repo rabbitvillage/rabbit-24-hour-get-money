@@ -5,3 +5,4 @@ __pycache__/
 btc5m_sim/data/
 btc5m_sim/.env
 btc5m_sim/.dash.env
+btc5m_sim/.live.env

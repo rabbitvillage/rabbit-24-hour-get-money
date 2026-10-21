@@ -23,6 +23,7 @@ Wants=network-online.target
 [Service]
 WorkingDirectory=$REPO
 EnvironmentFile=$REPO/$ENV
+EnvironmentFile=-$REPO/btc5m_sim/.live.env
 Environment=DATA_DIR=$REPO/btc5m_sim/data
 ExecStart=/usr/bin/env python3 -m btc5m_sim.sim
 Restart=always

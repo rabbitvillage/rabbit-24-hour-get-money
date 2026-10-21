@@ -15,6 +15,8 @@ Run:  python3 -m btc5m_sim.sim            (env: see .env.example)
 import csv, json, os, sys, threading, time, urllib.request, urllib.parse
 from datetime import datetime, timezone, timedelta
 
+from . import live   # phase-1 executor; EXEC_MODE=off keeps it inert
+
 UA = {"User-Agent": "Mozilla/5.0 btc5m-sim"}
 GAMMA = "https://gamma-api.polymarket.com/events?slug=btc-updown-5m-{}"
 BOOK = "https://clob.polymarket.com/book?token_id={}"
@@ -345,6 +347,7 @@ def watch(start, rows, vrows, lock):
                     hit = evaluate(asks, MIN_PRICE, MAX_PRICE, SHARES)
                     if hit:
                         fill(row, hit, m["outcomes"], asks, secs_left, ms)
+                        live.submit("main", m, hit[0], hit[1], secs_left)
                 for name in list(pending):
                     v = pending[name]
                     if secs_left > v["window"]:
@@ -359,6 +362,7 @@ def watch(start, rows, vrows, lock):
                             hit = None
                     if hit:
                         fill(v, hit, m["outcomes"], asks, secs_left, ms)
+                        live.submit(name, m, hit[0], hit[1], secs_left)
                         v["spot_at_entry"] = sp
                         if csamples:
                             v["chain_at_entry"] = csamples[-1][1]; v["chain_age_at_entry"] = round(now - csamples[-1][2])
@@ -385,6 +389,7 @@ def watch(start, rows, vrows, lock):
                     score(row, win)
                     for v in vstate.values():
                         v["price_to_beat"] = ptb; score(v, win)
+                    live.settle(row["slug"], win)
                     break
             except Exception:
                 pass
@@ -446,10 +451,11 @@ def vsummary(vrows, since):
 def main():
     os.makedirs(DATA, exist_ok=True)
     rows, vrows, lock, seen = [], [], threading.Lock(), set()
+    exec_mode = live.init(notify=tg, log=log)
     log(f"start: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s; "
         f"variants {[n for n, _, _, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")
     tg(f"🟢 BTC 5m 模擬 bot 啟動（不下單）\n規則：最後 {ENTRY_WINDOW} 秒，領先方賣價 {MIN_PRICE}~{MAX_PRICE} 就假想買 {SHARES:g} 股\n"
-       f"影子變體：{', '.join(n for n, _, _, _, _ in VARIANTS)}")
+       f"影子變體：{', '.join(n for n, _, _, _, _ in VARIANTS)}\n下單模式：{exec_mode}" + ("（真單！）" if exec_mode == "live" else "（不送單）"))
     last_hour = int(time.time() // 3600); last_day = datetime.now(TZ).date(); day_start = time.time()
     while True:
         now = time.time()
@@ -461,7 +467,7 @@ def main():
         if h != last_hour:
             with lock:
                 msg = summary(rows, now - 3600); vmsg = vsummary(vrows, now - 3600)
-            tg("⏱ 過去一小時\n" + msg + ("\n影子變體\n" + vmsg if VARIANTS else "")); log("hourly:", msg); last_hour = h
+            tg("⏱ 過去一小時\n" + msg + ("\n影子變體\n" + vmsg if VARIANTS else "") + ("\n" + live.summary() if exec_mode != "off" else "")); log("hourly:", msg); last_hour = h
         d = datetime.now(TZ).date()
         if d != last_day:
             with lock:
