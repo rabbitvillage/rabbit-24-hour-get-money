@@ -21,7 +21,7 @@ ${items.map((it, i) => {
 // The 2026-10-20 14:05 market: BTC spot minus the line, seconds left -> USD (sampled from sim_book.csv)
 const FLIP = [[140, -55.0], [130, -34.6], [120, -34.6], [110, -34.6], [100, -35.7], [90, -30.1], [80, -38.6], [70, -11.1], [60, -12.8], [55, -4.7], [50, -14.1], [45, -4.8], [40, -4.7], [37, -7.8], [34, -11.5], [32, -8.1], [31, 6.9], [30, 15.3], [29, 22.0], [25, 23.0], [20, 22.7], [15, 20.5], [10, 15.3], [6, 15.3]];
 function flipChart() {
-  const W = 640, H = 230, L = 50, R = 16, T = 16, B = 34, yMin = -60, yMax = 30;
+  const W = 640, H = 260, L = 50, R = 16, T = 40, B = 34, yMin = -60, yMax = 32;
   const xs = (s) => L + ((150 - s) / 150) * (W - L - R);
   const ys = (v) => T + (1 - (v - yMin) / (yMax - yMin)) * (H - T - B);
   const pts = FLIP.map(([s, v]) => `${xs(s).toFixed(1)},${ys(v).toFixed(1)}`).join(" ");
@@ -30,12 +30,12 @@ function flipChart() {
   return `<svg viewBox="0 0 ${W} ${H}" class="chart" role="img">${grid}${xl}
 <text x="${W - R}" y="${(ys(0) - 6).toFixed(1)}" class="lbl" text-anchor="end">開盤價（基準線）</text>
 <rect x="${xs(60).toFixed(1)}" y="${T}" width="${(xs(0) - xs(60)).toFixed(1)}" height="${H - T - B}" fill="var(--warn)" opacity="0.08"/>
-<text x="${xs(30).toFixed(1)}" y="${T + 14}" class="lbl" text-anchor="middle">最後 60 秒＝結算只看這段的平均</text>
+<text x="${xs(30).toFixed(1)}" y="${(H - B - 8).toFixed(1)}" class="lbl" text-anchor="middle">最後 60 秒＝結算只看這段的平均</text>
 <polyline fill="none" stroke="var(--acc)" stroke-width="2.5" points="${pts}"/>
 <circle cx="${xs(37).toFixed(1)}" cy="${ys(-7.8).toFixed(1)}" r="6" fill="var(--bad)"/>
-<text x="${(xs(37) - 10).toFixed(1)}" y="${(ys(-7.8) + 24).toFixed(1)}" class="note" text-anchor="end">剩 36 秒：離線只有 8 美元，市場卻說 Down 99% 穩</text>
+<text x="${(xs(37) - 12).toFixed(1)}" y="${(ys(-7.8) + 26).toFixed(1)}" class="note" text-anchor="end">剩 36 秒：離線只有 8 美元，市場卻說 Down 99% 穩 →</text>
 <circle cx="${xs(29).toFixed(1)}" cy="${ys(22).toFixed(1)}" r="6" fill="var(--good)"/>
-<text x="${(xs(29) + 10).toFixed(1)}" y="${(ys(22) - 10).toFixed(1)}" class="note" text-anchor="start">5 秒後跳到線上方 22 美元，翻成 Up</text>
+<text x="${(xs(29) - 12).toFixed(1)}" y="${(ys(22) - 14).toFixed(1)}" class="note" text-anchor="end">5 秒後跳到線上方 22 美元，翻成 Up →</text>
 <text x="${((L + W - R) / 2).toFixed(1)}" y="${H - 24}" class="lbl" text-anchor="middle">剩餘秒數 →</text>
 </svg>`;
 }
