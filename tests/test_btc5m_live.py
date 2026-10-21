@@ -47,6 +47,27 @@ class Guards(unittest.TestCase):
         self.assertTrue(live.guard("w20_p98", "btc-updown-5m-1", 0.98, 5)[0])
 
 
+class BalanceFloor(unittest.TestCase):
+    def setUp(self):
+        live._orders.clear(); live._daily.clear(); live._balance.update(usdc=None, at=0.0, alerted=None)
+        self.d = tempfile.TemporaryDirectory(); live.DATA = self.d.name; live.KILL_FILE = os.path.join(self.d.name, "STOP")
+        self.notes = []; live._notify = self.notes.append; live._log = lambda *a: None
+    def tearDown(self): self.d.cleanup(); live._balance.update(usdc=None, at=0.0, alerted=None)
+
+    def test_below_floor_blocks_live_only_and_alerts_once(self):
+        live._balance.update(usdc=42.0, at=live.time.time())          # cached reading below the $50 floor
+        ok, why = live.guard("main", "btc-updown-5m-1", 0.98, 5, mode="live")
+        self.assertFalse(ok); self.assertIn("below floor", why); self.assertEqual(len(self.notes), 1)
+        live.guard("w20_p98", "btc-updown-5m-1", 0.98, 5, mode="live"); self.assertEqual(len(self.notes), 1)   # one alert per day
+        self.assertTrue(live.guard("main", "btc-updown-5m-1", 0.98, 5, mode="dry")[0])                       # dry never checks the wallet
+        live._balance.update(usdc=133.7, at=live.time.time())
+        self.assertTrue(live.guard("main", "btc-updown-5m-2", 0.98, 5, mode="live")[0])
+
+    def test_unreadable_balance_does_not_block(self):
+        live.API_KEY = ""                                               # no credentials -> wallet_balance() returns None
+        self.assertTrue(live.guard("main", "btc-updown-5m-1", 0.98, 5, mode="live")[0])
+
+
 class Amounts(unittest.TestCase):
     def test_amounts_and_tick(self):
         # V2 market BUY: USDC floored to cents, shares = usdc/price truncated to tick decimals + 2

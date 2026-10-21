@@ -26,6 +26,10 @@ PRICE_MIN, PRICE_MAX = 0.5, 0.99
 MAX_DAILY_LOSS_VARIANT = float(os.getenv("MAX_DAILY_LOSS_VARIANT", "15"))
 MAX_DAILY_LOSS_TOTAL = float(os.getenv("MAX_DAILY_LOSS_TOTAL", "50"))
 KILL_FILE = os.getenv("KILL_FILE", os.path.join(DATA, "STOP"))
+# Capital floor (fish 2026-10-22: no daily volume cap; only stop when the wallet's USDC drops below this).
+MIN_BALANCE_USDC = float(os.getenv("MIN_BALANCE_USDC", "50"))
+BALANCE_TTL = float(os.getenv("BALANCE_TTL", "60"))         # seconds between balance refreshes
+_balance = {"usdc": None, "at": 0.0, "alerted": None}
 SLUG_PREFIX = "btc-updown-5m-"
 CLOB = os.getenv("CLOB_HOST", "https://clob.polymarket.com")
 # Polymarket refuses orders from US IPs (racknerd is in New York). Authenticated exchange calls (POST /order,
@@ -68,7 +72,7 @@ def init(notify=None, log=None):
             for r in csv.DictReader(f):
                 _daily.setdefault(r["day"], {}); _daily[r["day"]][r["variant"]] = _daily[r["day"]].get(r["variant"], 0.0) + float(r["pnl"] or 0)
     _recover_pending()
-    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} slip={SLIP} proxy={ORDER_PROXY or 'direct'} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} kill={KILL_FILE}"
+    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} slip={SLIP} proxy={ORDER_PROXY or 'direct'} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} kill={KILL_FILE}"
          + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all"))
     if MODE == "live" and not (SIGNER_URL and SIGNER_TOKEN and SIGNER_ADDRESS and API_KEY and API_SECRET and API_PASSPHRASE):
         _log("live: MISSING credentials -> falling back to dry")
@@ -125,6 +129,23 @@ def realised(variant=None, day=None):
     return sum(d.values()) if variant is None else d.get(variant, 0.0)
 
 
+def wallet_balance(force=False):
+    """Available USDC in the proxy wallet via the CLOB (authenticated, proxied). Cached BALANCE_TTL seconds.
+    Returns None when it cannot be read (then the guard lets orders through: a read failure must not freeze trading)."""
+    now = time.time()
+    if not force and _balance["usdc"] is not None and now - _balance["at"] < BALANCE_TTL:
+        return _balance["usdc"]
+    if not (API_KEY and API_SECRET and API_PASSPHRASE and SIGNER_ADDRESS): return None
+    try:
+        h = l2_headers("GET", "/balance-allowance", "")
+        d = _get(f"{CLOB}/balance-allowance?asset_type=COLLATERAL&signature_type=1", timeout=10, headers=h, proxied=True)
+        usdc = int(d.get("balance", 0)) / 1e6
+        _balance.update(usdc=usdc, at=now)
+        return usdc
+    except Exception as e:
+        _log(f"live: balance read failed {type(e).__name__}"); return _balance["usdc"]
+
+
 def guard(variant, slug, price, size, mode=None):
     """Return (ok, reason). Every reason is recorded in the ledger so skipped orders are visible."""
     mode = mode or MODE
@@ -136,6 +157,12 @@ def guard(variant, slug, price, size, mode=None):
     if size <= 0 or size > MAX_SHARES: return False, f"size {size} out of range"
     if (variant, slug) in _orders: return False, "already ordered this market"
     if realised() <= -MAX_DAILY_LOSS_TOTAL: return False, f"total daily loss {realised():+.2f} hit stop"
+    if mode == "live":
+        bal = wallet_balance()
+        if bal is not None and bal < MIN_BALANCE_USDC:
+            if _balance["alerted"] != today():
+                _balance["alerted"] = today(); _notify(f"⛔ 錢包 USDC ${bal:.2f} 低於下限 ${MIN_BALANCE_USDC:g}，停止下單（回到下限以上自動恢復）")
+            return False, f"wallet ${bal:.2f} below floor ${MIN_BALANCE_USDC:g}"
     if realised(variant) <= -MAX_DAILY_LOSS_VARIANT: return False, f"rule daily loss {realised(variant):+.2f} hit stop"
     return True, ""
 
@@ -343,8 +370,9 @@ def settle(slug, winner):
 
 def summary(day=None):
     d = _daily.get(day or today(), {})
-    if not d: return "真單：今日無已結算"
-    return "真單今日：" + "｜".join(f"{k} {v:+.2f}" for k, v in sorted(d.items())) + f"｜合計 {sum(d.values()):+.2f}"
+    bal = _balance["usdc"]; btxt = f"｜錢包 USDC ${bal:.2f}" if bal is not None else ""
+    if not d: return "真單：今日無已結算" + btxt
+    return "真單今日：" + "｜".join(f"{k} {v:+.2f}" for k, v in sorted(d.items())) + f"｜合計 {sum(d.values()):+.2f}" + btxt
 
 
 if __name__ == "__main__":
@@ -352,6 +380,8 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "whoami":
         print(json.dumps(identity()))
+    elif cmd == "balance":
+        print(json.dumps({"usdc": wallet_balance(force=True), "floor": MIN_BALANCE_USDC}))
     elif cmd == "region":           # is the exchange going to accept orders from where our authenticated calls exit?
         g = _get("https://polymarket.com/api/geoblock", timeout=12, proxied=True)
         print(json.dumps({"proxy": ORDER_PROXY or "(direct)", **g}))
