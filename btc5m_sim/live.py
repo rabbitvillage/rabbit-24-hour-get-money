@@ -301,7 +301,9 @@ if __name__ == "__main__":
         print(f"wrote {LIVE_ENV} (0600): signer address {addr}, api key {key[:8]}…")
     elif cmd == "dry-sign":         # ask the Worker to validate (not sign) a sample order for the current market
         start = int(time.time() // 300) * 300
-        ev = _get(GAMMA.format(start))[0]; m = ev["markets"][0]
+        evs = _get(GAMMA.format(start)) or _get(GAMMA.format(start - 300))   # gamma publishes a market a little after it opens
+        if not evs: raise SystemExit("gamma has no current/previous market; try again in a minute")
+        ev = evs[0]; m = ev["markets"][0]
         tokens = json.loads(m["clobTokenIds"]); ident = identity()
         maker, taker, shares, usdc = amounts(0.95, LIVE_SHARES)
         order = dict(salt=new_salt(), maker=ident["proxyWallet"], signer=ident["address"], tokenId=str(tokens[0]), makerAmount=str(maker),
