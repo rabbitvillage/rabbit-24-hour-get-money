@@ -63,7 +63,7 @@ def parse_variant(s):
     return s, int(w[1:]), lo, hi, filt
 
 
-VARIANTS = [parse_variant(v) for v in os.getenv("VARIANTS", "w45_p98,w30_p98,w20_p98,w45_p99,w30_p99,w45_p98_s,w45_p98_s10,w45_p98_s20,w45_p98_s30,w60_m95_s10,w60_m95_s20,w90_m99_s30,w120_m99_s40").split(",") if v.strip()]
+VARIANTS = [parse_variant(v) for v in os.getenv("VARIANTS", "w45_p98,w30_p98,w20_p98,w45_p99,w30_p99,w45_p98_s,w45_p98_s10,w45_p98_s20,w45_p98_s30,w60_m95_s10,w60_m95_s20,w90_m99_s30,w120_m99_s40,w45_m99_s20").split(",") if v.strip()]
 
 
 def dist_ok(side, dl, min_abs):

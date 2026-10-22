@@ -20,7 +20,7 @@ class VariantParsing(unittest.TestCase):
 
     def test_defaults(self):
         names = [n for n, _, _, _, _ in sim.VARIANTS]
-        self.assertEqual(names, ["w45_p98", "w30_p98", "w20_p98", "w45_p99", "w30_p99", "w45_p98_s", "w45_p98_s10", "w45_p98_s20", "w45_p98_s30", "w60_m95_s10", "w60_m95_s20", "w90_m99_s30", "w120_m99_s40"])
+        self.assertEqual(names, ["w45_p98", "w30_p98", "w20_p98", "w45_p99", "w30_p99", "w45_p98_s", "w45_p98_s10", "w45_p98_s20", "w45_p98_s30", "w60_m95_s10", "w60_m95_s20", "w90_m99_s30", "w120_m99_s40", "w45_m99_s20"])
 
     def test_dist_ok(self):
         self.assertTrue(sim.dist_ok("Up", 9.4, 0)); self.assertFalse(sim.dist_ok("Down", 9.4, 0))   # the 16:50 loss: Down bought while spot was +9.4
