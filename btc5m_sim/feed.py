@@ -4,7 +4,7 @@ sim.py calls update() on every order-book poll and finish()/resolved() at market
 state to the dashboard (DASH_URL's /api/now) every FEED_EVERY seconds when something changed, else a heartbeat
 every FEED_HEARTBEAT seconds. Plain Traditional-Chinese sentences; the page shows them as text only.
 """
-import json, os, threading, time, urllib.request
+import json, os, re, threading, time, urllib.request
 from datetime import datetime, timezone, timedelta
 
 TZ = timezone(timedelta(hours=int(os.getenv("TZ_OFFSET", "8"))))
@@ -71,11 +71,12 @@ def update(slug, secs_left, asks, outcomes, dl, line_src, rules):
         m["phase"] = f"剩 {round(secs_left)} 秒" + ("，進場窗口內" if secs_left <= 60 else "，還沒到進場窗口（最後 60 秒）")
         m["rules"] = [dict(name=n, text=t, live=l) for n, t, l in rules]
         for n, t, l in rules:
-            if _rule_text.get(n) != t:
-                if n in _rule_text and l:           # only live rules narrate changes (the 8 shadow rules would be noise)
+            key = re.sub(r"[+\-]?\d+(\.\d+)?", "#", t)      # the kind of state, numbers removed: a price or distance wobble is not an event
+            if _rule_text.get(n) != key:
+                if n in _rule_text and l:           # only live rules narrate changes (shadow rules would be noise)
                     _state["events"].insert(0, f"{_now()} 剩 {round(secs_left)} 秒 {n}：{t}")
                     del _state["events"][MAX_EVENTS:]
-                _rule_text[n] = t
+                _rule_text[n] = key
         _mark()
 
 
