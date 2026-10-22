@@ -12,7 +12,7 @@ Per-rule accounting (data/live_results.csv) and stops:
   - if KILL_FILE exists, every rule stops (manual kill switch:  touch data/STOP)
 Secrets (signer token, CLOB L2 credentials) live only in btc5m_sim/.live.env (0600). The private key is never on this host.
 """
-import base64, csv, hashlib, hmac, json, os, threading, time, urllib.error, urllib.request
+import base64, csv, hashlib, hmac, http.client, json, os, queue, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime, timezone, timedelta
 
 MODE = os.getenv("EXEC_MODE", "off").strip().lower()
@@ -36,6 +36,9 @@ CLOB = os.getenv("CLOB_HOST", "https://clob.polymarket.com")
 # /auth/derive-api-key, /data/*) go through this HTTP proxy when set — on racknerd it is the local sing-box
 # inbound whose outbound exits in Sofia (BG, allowed). Market data (gamma, /book, /tick-size) stays direct for speed.
 ORDER_PROXY = os.getenv("ORDER_PROXY", "")
+ORDER_TYPE = os.getenv("LIVE_ORDER_TYPE", "FAK")          # FAK: take what is there at <= cap, cancel the rest (FOK lost half the chances)
+WARM_EVERY = float(os.getenv("LIVE_WARM_EVERY", "25"))    # keep the exchange connections (through the proxy) open with a cheap GET
+_pool = queue.Queue()                                     # warm HTTPS connections to the CLOB (tunnelled through the proxy)
 SIGNER_URL = os.getenv("SIGNER_URL", "")                     # e.g. https://rcss-signer.../btc5m/sign
 SIGNER_TOKEN = os.getenv("SIGNER_TOKEN", "")
 SIGNER_ADDRESS = os.getenv("SIGNER_ADDRESS", "")             # EOA that signs (POLY_ADDRESS header)
@@ -72,7 +75,9 @@ def init(notify=None, log=None):
             for r in csv.DictReader(f):
                 _daily.setdefault(r["day"], {}); _daily[r["day"]][r["variant"]] = _daily[r["day"]].get(r["variant"], 0.0) + float(r["pnl"] or 0)
     _recover_pending()
-    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} slip={SLIP} proxy={ORDER_PROXY or 'direct'} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} kill={KILL_FILE}"
+    if MODE == "live" and WARM_EVERY > 0:
+        threading.Thread(target=_keep_warm, daemon=True).start()
+    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} kill={KILL_FILE}"
          + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all"))
     if MODE == "live" and not (SIGNER_URL and SIGNER_TOKEN and SIGNER_ADDRESS and API_KEY and API_SECRET and API_PASSPHRASE):
         _log("live: MISSING credentials -> falling back to dry")
@@ -244,6 +249,63 @@ def l2_headers(method, path, body_str):
     return {"POLY_ADDRESS": SIGNER_ADDRESS, "POLY_SIGNATURE": sig, "POLY_TIMESTAMP": ts, "POLY_API_KEY": API_KEY, "POLY_PASSPHRASE": API_PASSPHRASE}
 
 
+def _clob_host():
+    return urllib.parse.urlsplit(CLOB).hostname
+
+
+def _new_conn():
+    """One HTTPS connection to the CLOB, tunnelled through ORDER_PROXY (CONNECT) when set."""
+    if ORDER_PROXY:
+        u = urllib.parse.urlsplit(ORDER_PROXY)
+        c = http.client.HTTPSConnection(u.hostname, u.port or 80, timeout=12)
+        c.set_tunnel(_clob_host(), 443)
+    else:
+        c = http.client.HTTPSConnection(_clob_host(), 443, timeout=12)
+    c.connect()
+    return c
+
+
+def clob_request(method, path, body=None, headers=None, _retry=True):
+    """Exchange call on a pooled, already-open connection (saves the TLS + proxy handshake per order).
+    Returns (status, json). Reconnects once on a dead socket."""
+    try:
+        c = _pool.get_nowait()
+    except queue.Empty:
+        c = _new_conn()
+    try:
+        c.request(method, path, body=body, headers={**UA, "content-type": "application/json", **(headers or {})})
+        r = c.getresponse(); data = r.read()
+        try: j = json.loads(data)
+        except Exception: j = {"raw": data[:200].decode(errors="replace")}
+        _pool.put(c)
+        return r.status, j
+    except (http.client.HTTPException, OSError) as e:
+        try: c.close()
+        except Exception: pass
+        if _retry:
+            return clob_request(method, path, body, headers, _retry=False)
+        raise
+
+
+def _keep_warm(n=3):
+    """Hold n warm connections; touch each every WARM_EVERY seconds with GET /time so proxies and Cloudflare keep them open."""
+    while True:
+        try:
+            conns = []
+            for _ in range(n):
+                try: conns.append(_pool.get_nowait())
+                except queue.Empty: conns.append(_new_conn())
+            for c in conns:
+                try:
+                    c.request("GET", "/time", headers=UA); c.getresponse().read(); _pool.put(c)
+                except (http.client.HTTPException, OSError):
+                    try: c.close()
+                    except Exception: pass
+        except Exception as e:
+            _log(f"live: keep-warm {type(e).__name__}")
+        time.sleep(WARM_EVERY)
+
+
 def _opener(proxied):
     """urllib opener; when `proxied` and ORDER_PROXY is set, route through the proxy (never for market data)."""
     if proxied and ORDER_PROXY:
@@ -289,7 +351,7 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
     slug = market["slug"]; outcome = market["outcomes"][side_idx]; token = market["tokens"][side_idx]
     price = min(PRICE_MAX, round(ask + SLIP, 3)); size = LIVE_SHARES
     row = dict(ts=datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"), mode=mode, variant=variant, slug=slug, outcome=outcome, token_id=token,
-               ask=ask, price=price, size=size, tick=DEFAULT_TICK, neg_risk=market.get("negRisk", ""), order_type="FOK", status="", order_id="",
+               ask=ask, price=price, size=size, tick=DEFAULT_TICK, neg_risk=market.get("negRisk", ""), order_type=ORDER_TYPE, status="", order_id="",
                filled_size=0, cost=0, secs_left=secs_left, msg="")
     with _lock:
         ok, why = guard(variant, slug, price, size, mode)
@@ -304,7 +366,7 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
         maker, taker, shares, usdc = amounts(price, size, tick)
         row["size"] = shares; row["cost"] = usdc
         if mode != "live":
-            row["status"] = "dry"; row["msg"] = f"not sent; would post FOK BUY {shares} sh for ${usdc:.2f}"
+            row["status"] = "dry"; row["msg"] = f"not sent; would post {ORDER_TYPE} BUY {shares} sh for ${usdc:.2f}"
             _log(f"live DRY {variant} {slug} BUY {outcome} {shares}@{price} ${usdc:.2f} (ask {ask}, {secs_left}s)")
             return row
         ident = identity()
@@ -320,13 +382,16 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
                     makerAmount=order["makerAmount"], takerAmount=order["takerAmount"], side="BUY", expiration="0",
                     signatureType=1, timestamp=order["timestamp"], metadata=ZERO32, builder=ZERO32, signature=signed["signature"])
         # 2) POST /order with L2 headers; the body string we sign is exactly the one we send
-        body = json.dumps({"order": wire, "orderType": "FOK", "owner": API_KEY})
-        st, resp = _post(f"{CLOB}/order", body, l2_headers("POST", "/order", body), timeout=12, proxied=True)
+        body = json.dumps({"order": wire, "orderType": ORDER_TYPE, "owner": API_KEY})
+        st, resp = clob_request("POST", "/order", body, l2_headers("POST", "/order", body))
         row["order_id"] = str(resp.get("orderID") or ""); status = str(resp.get("status") or "").lower()
-        try: taking = float(resp.get("takingAmount") or 0)
-        except (TypeError, ValueError): taking = 0.0
-        if resp.get("success") and status == "matched":
-            row["status"] = "filled"; row["filled_size"] = taking or shares; row["cost"] = usdc
+        def _num(k):
+            try: return float(resp.get(k) or 0)
+            except (TypeError, ValueError): return 0.0
+        taking, making = _num("takingAmount"), _num("makingAmount")   # shares received / USDC actually spent (FAK may be partial)
+        if resp.get("success") and taking > 0:
+            row["status"] = "filled"; row["filled_size"] = taking; row["cost"] = making or usdc
+            if taking + 1e-6 < shares: row["msg"] = f"partial {taking:g}/{shares:g}"
         elif resp.get("success"):
             row["status"] = "unfilled"; row["msg"] = status
         else:

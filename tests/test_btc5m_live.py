@@ -1,5 +1,5 @@
 """Tests for the phase-1 executor: guards, ledger, stops, header signing. No network."""
-import base64, csv, hashlib, hmac, os, tempfile, unittest, urllib.request
+import base64, csv, hashlib, hmac, json, os, tempfile, unittest, urllib.request
 from importlib import reload
 
 os.environ["EXEC_MODE"] = "dry"
@@ -136,6 +136,42 @@ class ProxyRouting(unittest.TestCase):
         self.assertEqual(proxies(live._opener(False)), {})
         live.ORDER_PROXY = ""
         self.assertEqual(proxies(live._opener(True)), {})
+
+
+class FakPartialFill(unittest.TestCase):
+    """Live submit with every network call stubbed: FAK partial fills are booked at what was really spent."""
+    def setUp(self):
+        live._orders.clear(); live._daily.clear(); live._balance.update(usdc=200.0, at=live.time.time(), alerted=None)
+        self.d = tempfile.TemporaryDirectory(); live.DATA = self.d.name; live.KILL_FILE = os.path.join(self.d.name, "STOP")
+        self.notes = []; live._notify = self.notes.append; live._log = lambda *a: None
+        self.saved = (live._get, live.identity, live.worker, live.clob_request, live.l2_headers, live.API_KEY, live.API_SECRET, live.API_PASSPHRASE, live.SIGNER_ADDRESS)
+        live.API_KEY = "k"; live.API_SECRET = base64.urlsafe_b64encode(b"s").decode(); live.API_PASSPHRASE = "p"; live.SIGNER_ADDRESS = "0xabc"
+        self.sizes = (live.LIVE_SHARES, live.MAX_SHARES); live.LIVE_SHARES, live.MAX_SHARES = 15.0, 15.0
+        live._get = lambda url, **kw: {"minimum_tick_size": "0.001"}
+        live.identity = lambda: {"address": "0xabc", "proxyWallet": "0xdef"}
+        live.worker = lambda op, payload=None, timeout=8: (200, {"ok": True, "signature": "0xsig", "digest": "0xd"})
+        live.l2_headers = lambda m, p, b: {}
+    def tearDown(self):
+        (live._get, live.identity, live.worker, live.clob_request, live.l2_headers, live.API_KEY, live.API_SECRET, live.API_PASSPHRASE, live.SIGNER_ADDRESS) = self.saved
+        live.LIVE_SHARES, live.MAX_SHARES = self.sizes
+        self.d.cleanup(); live._balance.update(usdc=None, at=0.0, alerted=None)
+
+    def test_partial_fill_books_actual_spend(self):
+        sent = {}
+        def fake_post(method, path, body=None, headers=None):
+            sent["body"] = json.loads(body); return 200, {"success": True, "status": "matched", "orderID": "o1", "makingAmount": "6.2", "takingAmount": "6.4"}
+        live.clob_request = fake_post
+        row = live._submit("w45_p98_s10", market(), 1, 0.98, 30.0, mode="live")          # asked 15 sh -> got 6.4 for $6.20
+        self.assertEqual(sent["body"]["orderType"], live.ORDER_TYPE); self.assertEqual(sent["body"]["order"]["side"], "BUY")
+        self.assertEqual((row["status"], row["filled_size"], row["cost"]), ("filled", 6.4, 6.2)); self.assertIn("partial", row["msg"])
+        live.settle(market()["slug"], "Up")                                                  # bought Down -> lost only what was spent
+        r = csv.DictReader(open(os.path.join(self.d.name, "live_results.csv"))); row2 = list(r)[0]
+        self.assertAlmostEqual(float(row2["pnl"]), -6.2, 3)
+
+    def test_zero_fill_is_unfilled(self):
+        live.clob_request = lambda m, p, body=None, headers=None: (200, {"success": True, "status": "unmatched", "orderID": "o2", "makingAmount": "0", "takingAmount": "0"})
+        row = live._submit("w45_p98_s20", market(), 1, 0.98, 30.0, mode="live")
+        self.assertEqual(row["status"], "unfilled")
 
 
 class Recovery(unittest.TestCase):
