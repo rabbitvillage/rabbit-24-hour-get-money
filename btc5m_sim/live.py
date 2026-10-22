@@ -158,8 +158,10 @@ def wallet_balance(force=False):
         _log(f"live: balance read failed {type(e).__name__}"); return _balance["usdc"]
 
 
-def guard(variant, slug, price, size, mode=None):
-    """Return (ok, reason). Every reason is recorded in the ledger so skipped orders are visible."""
+def guard(variant, slug, price, size, mode=None, outcome=None):
+    """Return (ok, reason). Every reason is recorded in the ledger so skipped orders are visible.
+    outcome: the side this order would buy. One market, one direction: once any rule holds Up here, no rule may buy
+    Down (2026-10-22 15:48 BTC and ETH both bought Up at 120s then Down at 60s — paying $72 for a $60 max payout)."""
     mode = mode or MODE
     if mode not in ("dry", "live"): return False, "mode off"
     if os.path.exists(KILL_FILE): return False, "kill file"
@@ -168,6 +170,9 @@ def guard(variant, slug, price, size, mode=None):
     if not (PRICE_MIN <= price <= PRICE_MAX): return False, f"price {price} out of range"
     if size <= 0 or size > MAX_SHARES: return False, f"size {size} out of range"
     if (variant, slug) in _orders: return False, "already ordered this market"
+    if outcome is not None:
+        held = {r.get("outcome") for (v, s), r in _orders.items() if s == slug and r.get("status") in ("", "filled", "dry", "pending")}
+        if held and outcome not in held: return False, f"opposite side already bought ({'/'.join(sorted(held))})"
     if realised() <= -MAX_DAILY_LOSS_TOTAL: return False, f"total daily loss {realised():+.2f} hit stop"
     if mode == "live":
         bal = wallet_balance()
@@ -363,7 +368,7 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
                ask=ask, price=price, size=size, tick=DEFAULT_TICK, neg_risk=market.get("negRisk", ""), order_type=ORDER_TYPE, status="", order_id="",
                filled_size=0, cost=0, secs_left=secs_left, msg="")
     with _lock:
-        ok, why = guard(variant, slug, price, size, mode)
+        ok, why = guard(variant, slug, price, size, mode, outcome)
         if not ok:
             row["status"] = "skipped"; row["msg"] = why; _append("live_orders.csv", OFIELDS, row); _last[(variant, slug)] = ("skipped", why)
             _log(f"live skip {variant} {slug} {outcome}@{price}: {why}"); return row

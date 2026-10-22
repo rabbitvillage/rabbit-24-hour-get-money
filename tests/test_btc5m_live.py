@@ -226,3 +226,21 @@ class WireFormat(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OneDirectionPerMarket(unittest.TestCase):
+    """Once a rule holds one side of a market, no other rule may buy the other side (no hedging against ourselves)."""
+    def setUp(self):
+        live._orders.clear()
+    def tearDown(self):
+        live._orders.clear()
+    def test_opposite_side_blocked_same_side_allowed(self):
+        live._orders[("w120_m99_s40", "btc-updown-5m-1")] = dict(status="filled", outcome="Up")
+        ok, why = live.guard("w60_m95_s20", "btc-updown-5m-1", 0.9, 5, mode="dry", outcome="Down")
+        self.assertFalse(ok); self.assertIn("opposite side", why)
+        self.assertTrue(live.guard("w60_m95_s20", "btc-updown-5m-1", 0.9, 5, mode="dry", outcome="Up")[0])
+        self.assertTrue(live.guard("w60_m95_s20", "btc-updown-5m-2", 0.9, 5, mode="dry", outcome="Down")[0])   # other market
+    def test_pending_reservation_counts(self):
+        live._orders[("w120_m99_s40", "btc-updown-5m-1")] = dict(status="", outcome="Up")   # reserved, network call in flight
+        self.assertFalse(live.guard("w45_p98_s10", "btc-updown-5m-1", 0.98, 5, mode="dry", outcome="Down")[0])
+
