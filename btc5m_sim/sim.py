@@ -83,6 +83,9 @@ VFIELDS = ["slug", "start_utc", "price_to_beat", "variant", "window", "min_price
            "chain_at_start", "chain_ptb_err", "chain_at_entry", "chain_dist_at_entry", "chain_age_at_entry", "chain_samples",
            "winner", "won", "pnl", "note"]
 CFIELDS = ["slug", "secs_left", "price", "updated_at", "round_id"]  # sim_chain.csv: one row per on-chain feed update
+# sim_decisions.csv: one row per market per rule — did it buy, and if not, why (shown on the dashboard)
+DFIELDS = ["slug", "start_utc", "variant", "decision", "reason", "ask", "secs_left", "dl", "threshold", "lead_min", "lead_max",
+           "live_status", "live_msg", "winner", "won", "pnl"]
 # one row per poll per market (sim_book.csv): the raw "curve" of both sides' best ask until close
 BFIELDS = ["slug", "secs_left", "up_ask", "up_sh", "up_usd", "down_ask", "down_sh", "down_usd", "spot", "fetch_ms"]
 
@@ -296,6 +299,25 @@ def append_rows(path, fields, rows):
             w.writerow({k: ("" if r.get(k) is None else r.get(k)) for k in fields})
 
 
+def decision_row(v, row):
+    """One line per rule per market: bought (with price/time) or skipped with the reason and the numbers behind it."""
+    d = dict(slug=v["slug"], start_utc=v["start_utc"], variant=v["variant"], lead_min=v.get("_lead_min"), lead_max=v.get("_lead_max"),
+             winner=row.get("winner"), won=v.get("won"), pnl=v.get("pnl"), live_status="", live_msg="", dl="", threshold=v.get("_filt") if v.get("_filt") is not None else "")
+    if v.get("entered"):
+        d.update(decision="buy", reason="entered", ask=v["ask"], secs_left=v["secs_left"])
+    elif v.get("_block"):
+        b = v["_block"]; d.update(decision="skip", reason=b["reason"], ask=b["ask"], secs_left=b["secs"], dl=b["dl"], threshold=b["thr"])
+    elif v.get("_depth_short"):
+        d.update(decision="skip", reason="depth", ask=v.get("_lead_min"), secs_left="")
+    elif v.get("_lead_min") is not None:
+        d.update(decision="skip", reason="price_out_of_band", ask=v.get("_lead_min"), secs_left="")
+    else:
+        d.update(decision="skip", reason="no_ask", ask="", secs_left="")
+    st = live.status_of(v["variant"], v["slug"])
+    if st: d["live_status"], d["live_msg"] = st
+    return d
+
+
 # ---------------- one market ----------------
 def watch(start, rows, vrows, lock):
     end = start + 300
@@ -358,11 +380,18 @@ def watch(start, rows, vrows, lock):
                         continue
                     if v.get("spot_at_window") is None:  # first poll inside this variant's window
                         v["spot_at_window"] = sp
+                    if lead is not None:                 # favourite's best ask seen inside this rule's window (for the "why not" log)
+                        v["_lead_min"] = min(v.get("_lead_min", lead), lead); v["_lead_max"] = max(v.get("_lead_max", lead), lead)
                     hit = evaluate(asks, v["min_price"], v["_max"], SHARES)
+                    if hit is None and lead is not None and v["min_price"] <= lead <= v["_max"]:
+                        v["_depth_short"] = True         # price was in band but fewer than SHARES on the book
                     if hit and v["_filt"] is not None:
                         ref = chain_at_start if chain_at_start is not None else spot_at_start
                         dl = None if sp is None or ref is None else sp - ref
                         if not dist_ok(m["outcomes"][hit[0]], dl, v["_filt"]):
+                            side_ok = dl is not None and ((dl > 0) if m["outcomes"][hit[0]] == "Up" else (dl < 0))
+                            v["_block"] = dict(reason="distance" if side_ok else ("no_spot" if dl is None else "direction"),
+                                               ask=hit[1], secs=secs_left, dl=None if dl is None else round(dl, 2), thr=v["_filt"])
                             hit = None
                     if hit:
                         fill(v, hit, m["outcomes"], asks, secs_left, ms)
@@ -406,9 +435,12 @@ def watch(start, rows, vrows, lock):
         row["_t"] = time.time()
         for v in vstate.values():
             v["_t"] = row["_t"]; finalize_dists(v, samples, end, ptb, spot_at_start); finalize_chain(v, csamples, ptb, chain_at_start)
+        decisions = [decision_row(v, row) for v in vstate.values()]
         with lock:
             rows.append(row); vrows.extend(vstate.values())
             append_rows(os.path.join(DATA, "sim_trades.csv"), FIELDS, [row])
+            if decisions:
+                append_rows(os.path.join(DATA, "sim_decisions.csv"), DFIELDS, decisions)
             if vstate:
                 append_rows(os.path.join(DATA, "sim_variants.csv"), VFIELDS, vstate.values())
             if series:

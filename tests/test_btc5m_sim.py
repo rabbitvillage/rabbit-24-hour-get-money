@@ -143,5 +143,21 @@ class DashboardCurve(unittest.TestCase):
         self.assertEqual(d["vanish_median"], 100.0)
 
 
+class DecisionLog(unittest.TestCase):
+    def test_reasons(self):
+        row = dict(winner="Up")
+        base = dict(slug="btc-updown-5m-1", start_utc="2026-10-22T05:00:00+00:00", variant="w45_p98_s10", entered=0, _filt=10.0)
+        self.assertEqual(sim.decision_row(dict(base, entered=1, ask=0.98, secs_left=44.2, won=1, pnl=0.3), row)["reason"], "entered")
+        d = sim.decision_row(dict(base, _block=dict(reason="distance", ask=0.99, secs=44.2, dl=4.2, thr=10.0), _lead_min=0.98, _lead_max=0.99), row)
+        self.assertEqual((d["decision"], d["reason"], d["dl"], d["threshold"], d["ask"]), ("skip", "distance", 4.2, 10.0, 0.99))
+        self.assertEqual(sim.decision_row(dict(base, _block=dict(reason="direction", ask=0.98, secs=30.0, dl=-7.8, thr=0.0)), row)["reason"], "direction")
+        self.assertEqual(sim.decision_row(dict(base, _lead_min=0.991, _lead_max=0.995), row)["reason"], "price_out_of_band")
+        self.assertEqual(sim.decision_row(dict(base, _lead_min=0.98, _lead_max=0.99, _depth_short=True), row)["reason"], "depth")
+        self.assertEqual(sim.decision_row(dict(base), row)["reason"], "no_ask")
+        sim.live._last[("w45_p98_s10", "btc-updown-5m-1")] = ("filled", "ok")
+        self.assertEqual(sim.decision_row(dict(base, entered=1, ask=0.98, secs_left=44.2), row)["live_status"], "filled")
+        sim.live._last.clear()
+
+
 if __name__ == "__main__":
     unittest.main()

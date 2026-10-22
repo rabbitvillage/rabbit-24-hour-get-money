@@ -75,7 +75,7 @@ function sanitize(p) {
     first_row_utc: str(p.first_row_utc, 40),
     last_row_utc: str(p.last_row_utc, 40),
     all: stats(p.all), last24h: stats(p.last24h),
-    variants: [], recent: [], losses: [], distance: {}, curve: [], vanish: {},
+    variants: [], recent: [], losses: [], distance: {}, curve: [], vanish: {}, decisions: [],
   };
   if (Array.isArray(p.variants)) for (const v of p.variants.slice(0, 12)) out.variants.push({ name: str(v && v.name, 16), ...stats(v) });
   if (Array.isArray(p.recent)) for (const r of p.recent.slice(0, 20)) out.recent.push({
@@ -85,6 +85,11 @@ function sanitize(p) {
     slug: str(r && r.slug, 40), time: str(r && r.time, 25), side: str(r && r.side, 8), ask: num(r && r.ask), secs_left: num(r && r.secs_left),
     dist_at_entry: num(r && r.dist_at_entry), min_abs_dist: num(r && r.min_abs_dist), pnl: num(r && r.pnl) });
   if (Array.isArray(p.curve)) for (const c of p.curve.slice(0, 40)) out.curve.push({ secs: num(c && c.secs), markets: num(c && c.markets), has_ask_pct: num(c && c.has_ask_pct), median_ask: num(c && c.median_ask), median_usd: num(c && c.median_usd) });
+  if (Array.isArray(p.decisions)) for (const m of p.decisions.slice(0, 24)) out.decisions.push({
+    slug: str(m && m.slug, 20), time: str(m && m.time, 8), winner: str(m && m.winner, 8),
+    rules: (Array.isArray(m && m.rules) ? m.rules.slice(0, 16) : []).map((r) => ({ name: str(r && r.name, 16), decision: str(r && r.decision, 8), reason: str(r && r.reason, 24),
+      ask: num(r && r.ask), secs: num(r && r.secs), dl: num(r && r.dl), thr: num(r && r.thr), lead_min: num(r && r.lead_min), lead_max: num(r && r.lead_max),
+      live: str(r && r.live, 12), won: num(r && r.won), pnl: num(r && r.pnl) })) });
   const vz = p.vanish && typeof p.vanish === "object" ? p.vanish : {};
   for (const k of ["markets", "never", "before_102", "s60_102", "s45_60", "s30_45", "under_30", "vanish_median", "with_98", "first98_median", "secs98_median"]) out.vanish[k] = num(vz[k]);
   const d = p.distance && typeof p.distance === "object" ? p.distance : {};
@@ -121,6 +126,28 @@ function chart(points, yKey, yMin, yMax, yFmt, color, marks) {
   return `<svg viewBox="0 0 ${W} ${H}" role="img" preserveAspectRatio="none" class="chart"><style>.g{stroke:var(--line);stroke-width:1}.t{fill:var(--mut);font-size:11px}.m{stroke:var(--warn);stroke-dasharray:4 3}</style>${grid}${mk}${xl}${pts.length > 1 ? `<polyline fill="none" stroke="${color}" stroke-width="2" points="${pts.join(" ")}"/>` : ""}</svg>`;
 }
 
+const REASON = { entered: "買", no_ask: "沒賣單", price_out_of_band: "價格不在區間", depth: "深度不夠", direction: "方向不對", distance: "距離不夠", no_spot: "沒現價" };
+const LIVE = { filled: "成交", unfilled: "沒吃到", rejected: "被拒", error: "錯誤", skipped: "", dry: "dry", "": "" };
+function cell(r) {
+  if (r.decision === "buy") {
+    const live = r.live && r.live !== "skipped" ? `<small>${esc(LIVE[r.live] ?? r.live)}</small>` : "";
+    const res = r.won === 1 ? "✓" : r.won === 0 ? "✗" : "";
+    return `<td class="${r.won === 0 ? "bad" : "good"}">買 ${n(r.ask, 3)}<small>${n(r.secs, 0)}s</small> ${res} ${live}</td>`;
+  }
+  let why = REASON[r.reason] || esc(r.reason);
+  if (r.reason === "distance" || r.reason === "direction") why += `<small>${r.dl === null ? "" : (r.dl > 0 ? "+" : "") + n(r.dl, 1) + " / " + n(r.thr, 0)}</small>`;
+  else if (r.reason === "price_out_of_band") why += `<small>${n(r.lead_min, 3)}–${n(r.lead_max, 3)}</small>`;
+  else if (r.reason === "depth") why += `<small>${n(r.ask, 3)}</small>`;
+  return `<td class="skip">${why}</td>`;
+}
+function decisionsTable(ds) {
+  if (!ds.length) return `<p class="sub">尚無決策紀錄（新版程式上線後的第一場結算就會出現）。</p>`;
+  const names = ds[0].rules.map((r) => r.name);
+  return `<div class="table-wrap"><table class="dec"><thead><tr><th>場（UTC）</th><th>結果</th>${names.map((x) => `<th>${esc(x)}</th>`).join("")}</tr></thead>
+<tbody>${ds.map((m) => `<tr><td>${esc(m.time)}<small>${esc(m.slug)}</small></td><td><b>${esc(m.winner)}</b></td>${names.map((x) => { const r = m.rules.find((q) => q.name === x); return r ? cell(r) : "<td></td>"; }).join("")}</tr>`).join("")}</tbody></table></div>
+<p class="sub" style="margin-top:6px">每格＝那條規則在那場的決定。「買 0.980 <small>44s</small> ✓ <small>成交</small>」＝剩 44 秒以 0.98 買、結果對、真單成交；「距離不夠 <small>+4.2 / 10</small>」＝幣價離開盤線 +4.2 美元，門檻 10；「方向不對」＝幣價站在要買的對面；「價格不在區間 <small>0.991–0.995</small>」＝窗口內領先方賣價範圍；「沒賣單」＝領先方整個窗口沒有賣單。真單標記只出現在有真單的規則。</p>`;
+}
+
 function render(s) {
   const now = Date.now();
   let title = "BTC 5m 模擬 bot — 尚無資料";
@@ -137,7 +164,7 @@ function render(s) {
     // snapshots pushed by older versions may lack these
     s.curve = Array.isArray(s.curve) ? s.curve : []; s.vanish = s.vanish && typeof s.vanish === "object" ? s.vanish : {};
     s.variants = Array.isArray(s.variants) ? s.variants : []; s.recent = Array.isArray(s.recent) ? s.recent : []; s.losses = Array.isArray(s.losses) ? s.losses : [];
-    s.distance = s.distance && typeof s.distance === "object" ? s.distance : {}; s.all = s.all || {}; s.last24h = s.last24h || {};
+    s.distance = s.distance && typeof s.distance === "object" ? s.distance : {}; s.all = s.all || {}; s.last24h = s.last24h || {}; s.decisions = Array.isArray(s.decisions) ? s.decisions : [];
     body = `
 <section class="cards">
   <div class="card"><div class="k">服務</div><div class="v">${svc}</div><div class="s">${esc(s.host)}</div></div>
@@ -151,6 +178,8 @@ function render(s) {
 <h2>影子變體 <small>同一場盤、不同進場規則（w = 最後幾秒開始找，p = 最低買價，m = 價格上限（領先方 50¢～m 都買），_s = 現價要站在買的那一邊，_s10／_s20／_s30 = 且離基準線 ≥10／20／30 美元；基準線用鏈上 Chainlink 開盤價，讀不到才用 Coinbase 開盤價）</small></h2>
 <div class="table-wrap"><table><thead><tr><th>變體</th><th>場次</th><th>可進場</th><th>已結算</th><th>輸</th><th>模擬損益</th><th>每筆平均</th><th>賣單中位數</th></tr></thead>
 <tbody>${s.variants.map((v) => statsRow(v.name, v)).join("")}</tbody></table></div>
+<h2>每場決策：11 條規則買了沒、為什麼 <small>最近 12 場，最新在上</small></h2>
+${decisionsTable(s.decisions)}
 <h2>最後 150 秒的訂單簿曲線 <small>每秒取樣；虛線 = 剩 102 秒（人工觀察的賣單消失點）與剩 45 秒（進場窗口）；最近 2 天</small></h2>
 <div class="charts">
   <div class="card"><div class="k">領先方還有賣單的場次比例（%）</div>${chart(s.curve, "has_ask_pct", 0, 100, (v) => n(v) + "%", "var(--acc)", [102, 45])}</div>
@@ -191,6 +220,7 @@ table{width:100%;border-collapse:collapse;background:var(--card);border:1px soli
 th,td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}th:first-child,td:first-child{text-align:left}thead th{color:var(--mut);font-weight:500;font-size:12px}
 tbody tr:last-child td{border-bottom:0}table.kv th{text-align:left;color:var(--mut);font-weight:500}.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 small{color:var(--mut)}.foot{color:var(--mut);font-size:12px;margin-top:18px}.table-wrap{overflow-x:auto}
+table.dec td,table.dec th{text-align:left;font-size:12px;padding:5px 7px;vertical-align:top}table.dec td.skip{color:var(--mut)}table.dec small{display:block;font-size:10px;color:var(--mut)}
 .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin-bottom:10px}.chart{width:100%;height:180px;display:block}
 </style></head><body><main><h1>${esc(title)} <small>Polymarket BTC 5 分鐘盤 · 最後 45 秒買 98~99¢ · 只讀模擬</small></h1>${body}</main></body></html>`;
 }

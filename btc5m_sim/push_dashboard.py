@@ -120,6 +120,23 @@ def book_curve(brows):
     return curve, dist
 
 
+def decisions(n_markets=12):
+    """Last n markets: per rule, bought or why not, plus live status. Compact for the dashboard."""
+    rows = read("sim_decisions.csv")
+    if not rows: return []
+    slugs = []
+    for r in rows:
+        if r["slug"] not in slugs: slugs.append(r["slug"])
+    out = []
+    for s in slugs[-n_markets:]:
+        rs = [r for r in rows if r["slug"] == s]
+        out.append(dict(slug=s.replace("btc-updown-5m-", ""), time=rs[0]["start_utc"][11:16], winner=rs[0]["winner"],
+                        rules=[dict(name=r["variant"], decision=r["decision"], reason=r["reason"], ask=f(r["ask"]), secs=f(r["secs_left"]),
+                                    dl=f(r["dl"]), thr=f(r["threshold"]), lead_min=f(r["lead_min"]), lead_max=f(r["lead_max"]),
+                                    live=r["live_status"], won=f(r["won"]), pnl=f(r["pnl"])) for r in rs]))
+    return out[::-1]
+
+
 def service_state():
     try:
         return subprocess.run(["systemctl", "is-active", SERVICE], capture_output=True, text=True, timeout=5).stdout.strip() or "unknown"
@@ -157,7 +174,7 @@ def build():
     return dict(generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), host=socket.gethostname(), service=service_state(),
                 rule="最後 45 秒，領先方賣價 0.98~0.99，5 股", first_row_utc=rows[0]["start_utc"][:16] if rows else "", last_row_utc=rows[-1]["start_utc"][:16] if rows else "",
                 all=stats(rows), last24h=stats([r for r in rows if ts(r) >= day]), variants=variants, recent=recent, losses=losses, distance=distance,
-                curve=curve, vanish=vanish)
+                curve=curve, vanish=vanish, decisions=decisions())
 
 
 def main():

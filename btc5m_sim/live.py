@@ -57,6 +57,7 @@ RFIELDS = ["ts", "variant", "slug", "outcome", "size", "cost", "fee", "winner", 
 _lock = threading.Lock()
 _notify = lambda text: None
 _orders = {}        # (variant, slug) -> order row dict (filled or pending)
+_last = {}          # (variant, slug) -> (status, short msg) of the last attempt, for the decision log
 _daily = {}         # day -> {variant: realised pnl}
 _stopped = set()    # variants stopped today (reset on day change)
 _stop_all_day = None
@@ -123,6 +124,11 @@ def _settle_when_resolved(slug):
             _log(f"live: recover {slug} poll error {type(e).__name__}")
         time.sleep(30)
     _log(f"live: recover {slug} gave up (unresolved after 40 min)")
+
+
+def status_of(variant, slug):
+    """(status, msg) of this rule's live attempt on this market, or None when nothing was attempted."""
+    return _last.get((variant, slug))
 
 
 def today():
@@ -358,7 +364,8 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
     with _lock:
         ok, why = guard(variant, slug, price, size, mode)
         if not ok:
-            row["status"] = "skipped"; row["msg"] = why; _append("live_orders.csv", OFIELDS, row); _log(f"live skip {variant} {slug} {outcome}@{price}: {why}"); return row
+            row["status"] = "skipped"; row["msg"] = why; _append("live_orders.csv", OFIELDS, row); _last[(variant, slug)] = ("skipped", why)
+            _log(f"live skip {variant} {slug} {outcome}@{price}: {why}"); return row
         _orders[(variant, slug)] = row   # reserve the slot before any network call
     try:
         tick = DEFAULT_TICK
@@ -415,6 +422,9 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
     finally:
         with _lock:   # the (variant, slug) slot stays reserved whatever happened: one attempt per rule per market
             _append("live_orders.csv", OFIELDS, row)
+            _last[(variant, slug)] = (row["status"], str(row["msg"])[:80])
+            if len(_last) > 2000:
+                for k in list(_last)[:1000]: _last.pop(k, None)
 
 
 def settle(slug, winner):
