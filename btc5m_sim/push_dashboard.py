@@ -184,9 +184,25 @@ def main():
         print(json.dumps(snap, ensure_ascii=False, indent=1)); return 0
     body = json.dumps(snap, ensure_ascii=False).encode()
     url = URL if ASSET == "btc" else URL + f"?asset={ASSET}"
-    req = urllib.request.Request(url, data=body, method="POST", headers={"content-type": "application/json", "authorization": f"Bearer {TOKEN}", "user-agent": "btc5m-push"})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        print(datetime.now().strftime("%m-%d %H:%M:%S"), "pushed", len(body), "bytes ->", r.status); return 0
+    return post(url, body)
+
+
+def post(url, body, attempts=2, pause=3.0):
+    """POST once; on a transport error (connection reset, timeout) wait and try once more. A second failure still exits
+    non-zero so systemd records it. 2026-10-22 21:54 one 'Connection reset by peer' from the edge tripped the host alert."""
+    import time
+    last = None
+    for i in range(attempts):
+        req = urllib.request.Request(url, data=body, method="POST", headers={"content-type": "application/json", "authorization": f"Bearer {TOKEN}", "user-agent": "btc5m-push"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                print(datetime.now().strftime("%m-%d %H:%M:%S"), "pushed", len(body), "bytes ->", r.status, "(retry)" if i else ""); return 0
+        except urllib.error.HTTPError:
+            raise                                   # 4xx/5xx from the Worker: not transient, do not repeat the body
+        except (urllib.error.URLError, OSError, TimeoutError) as e:
+            last = e; print(datetime.now().strftime("%m-%d %H:%M:%S"), f"push attempt {i + 1} failed: {type(e).__name__} {e}")
+            if i + 1 < attempts: time.sleep(pause)
+    raise last
 
 
 if __name__ == "__main__":
