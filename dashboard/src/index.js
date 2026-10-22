@@ -6,11 +6,13 @@
 import { reportHtml } from "./report.js";
 
 const KEY = "latest";
+const NOW_KEY = "now";
+const MAX_NOW = 16384;
 const MAX_BODY = 65536;
 const STALE_AFTER_S = 15 * 60;
 
 const SECURITY_HEADERS = {
-  "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
   "referrer-policy": "no-referrer",
@@ -23,8 +25,27 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/") {
       if (request.method !== "GET" && request.method !== "HEAD") return text(405, "method not allowed", { allow: "GET, HEAD" });
-      const raw = await env.DASH.get(KEY);
-      return html(render(raw ? safeParse(raw) : null));
+      const [raw, rawNow] = await Promise.all([env.DASH.get(KEY), env.DASH.get(NOW_KEY)]);
+      return html(render(raw ? safeParse(raw) : null, rawNow ? safeParse(rawNow) : null));
+    }
+    if (url.pathname === "/now.json") {
+      if (request.method !== "GET") return text(405, "method not allowed", { allow: "GET" });
+      const raw = await env.DASH.get(NOW_KEY);
+      return new Response(raw || "{}", { status: 200, headers: { "content-type": "application/json; charset=utf-8", ...SECURITY_HEADERS } });
+    }
+    if (url.pathname === "/now.js") {
+      if (request.method !== "GET") return text(405, "method not allowed", { allow: "GET" });
+      return new Response(NOW_JS, { status: 200, headers: { "content-type": "application/javascript; charset=utf-8", "cache-control": "public, max-age=300", ...SECURITY_HEADERS } });
+    }
+    if (url.pathname === "/api/now") {
+      if (request.method !== "POST") return text(405, "method not allowed", { allow: "POST" });
+      if (!(await authorized(request, env.PUSH_TOKEN))) return text(401, "unauthorized");
+      const body = await request.text();
+      if (body.length > MAX_NOW) return text(413, "too large");
+      const parsed = safeParse(body);
+      if (!parsed) return text(400, "bad json");
+      await env.DASH.put(NOW_KEY, JSON.stringify(sanitizeNow(parsed)));
+      return text(200, "ok");
     }
     if (url.pathname === "/report") {
       if (request.method !== "GET" && request.method !== "HEAD") return text(405, "method not allowed", { allow: "GET, HEAD" });
@@ -99,6 +120,59 @@ function sanitize(p) {
   return out;
 }
 
+// ---------- live feed (text only) ----------
+function sanitizeNow(p) {
+  const m = p.market && typeof p.market === "object" ? p.market : null;
+  const l = p.last && typeof p.last === "object" ? p.last : null;
+  const strs = (a, n, len) => (Array.isArray(a) ? a.slice(0, n).map((x) => str(x, len)) : []);
+  return {
+    updated: str(p.updated, 12), pushed: str(p.pushed, 12),
+    market: m ? { slug: str(m.slug, 40), window: str(m.window, 20), secs_left: num(m.secs_left), book: str(m.book, 160), line: str(m.line, 160), phase: str(m.phase, 80),
+      rules: (Array.isArray(m.rules) ? m.rules.slice(0, 16) : []).map((r) => ({ name: str(r && r.name, 16), text: str(r && r.text, 160), live: !!(r && r.live) })) } : null,
+    last: l ? { slug: str(l.slug, 40), window: str(l.window, 20), result: str(l.result, 40), lines: strs(l.lines, 16, 200) } : null,
+    events: strs(p.events, 12, 200),
+  };
+}
+
+function nowBox(nw) {
+  const m = nw && nw.market; const last = nw && nw.last; const ev = (nw && nw.events) || [];
+  const liveRules = m ? m.rules.filter((r) => r.live) : [];
+  const shadow = m ? m.rules.length - liveRules.length : 0;
+  return `<section id="now" class="card now">
+<div class="now-head"><span class="k">即時轉播</span><span id="now-stamp" class="s">${nw ? "更新 " + esc(nw.updated) : "尚未收到資料"}</span></div>
+<div id="now-market">${m ? `<div class="big">這一場 ${esc(m.window)}（台灣時間）｜${esc(m.phase)}</div>
+<div class="row">${esc(m.book)}</div><div class="row">${esc(m.line)}</div>
+<ul class="rules">${liveRules.map((r) => `<li><b>${esc(r.name)}</b>：${esc(r.text)}</li>`).join("")}</ul>
+${shadow ? `<div class="s">另有 ${shadow} 條規則只模擬不下單，決定記在下方「每場決策」表。</div>` : ""}` : `<div class="s">等待主機推送這一場的資料…</div>`}</div>
+<div id="now-events">${ev.length ? `<div class="k" style="margin-top:8px">變化</div><ul class="ev">${ev.map((e) => `<li>${esc(e)}</li>`).join("")}</ul>` : `<div class="s" style="margin-top:8px">這一場到目前沒有變化。</div>`}</div>
+<div id="now-last">${last ? `<div class="k" style="margin-top:8px">上一場 ${esc(last.window)}｜${esc(last.result)}</div><ul class="ev">${last.lines.map((e) => `<li>${esc(e)}</li>`).join("")}</ul>` : ""}</div>
+</section>`;
+}
+
+// Client script: re-fetch /now.json every 3 s and rebuild the box with textContent only (no HTML from data).
+const NOW_JS = `(function(){
+  var box=document.getElementById('now'); if(!box) return;
+  function el(tag,cls,text){var e=document.createElement(tag); if(cls) e.className=cls; if(text!==undefined) e.textContent=text; return e;}
+  function render(nw){
+    var stamp=document.getElementById('now-stamp'); if(stamp) stamp.textContent= nw&&nw.updated ? '更新 '+nw.updated : '尚未收到資料';
+    var mk=document.getElementById('now-market'); mk.replaceChildren();
+    var m=nw&&nw.market;
+    if(m){ mk.appendChild(el('div','big','這一場 '+m.window+'（台灣時間）｜'+m.phase));
+      mk.appendChild(el('div','row',m.book)); mk.appendChild(el('div','row',m.line));
+      var ul=el('ul','rules'); var shadow=0;
+      (m.rules||[]).forEach(function(r){ if(!r.live){shadow++;return;} var li=el('li'); var b=el('b','',r.name); li.appendChild(b); li.appendChild(document.createTextNode('：'+r.text)); ul.appendChild(li); });
+      mk.appendChild(ul); if(shadow) mk.appendChild(el('div','s','另有 '+shadow+' 條規則只模擬不下單，決定記在下方「每場決策」表。'));
+    } else mk.appendChild(el('div','s','等待主機推送這一場的資料…'));
+    var ev=document.getElementById('now-events'); ev.replaceChildren();
+    if(nw&&nw.events&&nw.events.length){ var k=el('div','k','變化'); k.style.marginTop='8px'; ev.appendChild(k); var u2=el('ul','ev'); nw.events.forEach(function(e){u2.appendChild(el('li','',e));}); ev.appendChild(u2); }
+    else { var s=el('div','s','這一場到目前沒有變化。'); s.style.marginTop='8px'; ev.appendChild(s); }
+    var la=document.getElementById('now-last'); la.replaceChildren();
+    if(nw&&nw.last){ var k2=el('div','k','上一場 '+nw.last.window+'｜'+nw.last.result); k2.style.marginTop='8px'; la.appendChild(k2); var u3=el('ul','ev'); (nw.last.lines||[]).forEach(function(e){u3.appendChild(el('li','',e));}); la.appendChild(u3); }
+  }
+  function tick(){ fetch('/now.json',{cache:'no-store'}).then(function(r){return r.json();}).then(render).catch(function(){}); }
+  setInterval(tick,3000);
+})();`;
+
 // ---------- rendering ----------
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const n = (v, d = 0) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? "—" : Number(v).toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }));
@@ -148,7 +222,7 @@ function decisionsTable(ds) {
 <p class="sub" style="margin-top:6px">每格＝那條規則在那場的決定。「買 0.980 <small>44s</small> ✓ <small>成交</small>」＝剩 44 秒以 0.98 買、結果對、真單成交；「距離不夠 <small>+4.2 / 10</small>」＝幣價離開盤線 +4.2 美元，門檻 10；「方向不對」＝幣價站在要買的對面；「價格不在區間 <small>0.991–0.995</small>」＝窗口內領先方賣價範圍；「沒賣單」＝領先方整個窗口沒有賣單。真單標記只出現在有真單的規則。</p>`;
 }
 
-function render(s) {
+function render(s, nw) {
   const now = Date.now();
   let title = "BTC 5m 模擬 bot — 尚無資料";
   let body = `<p class="warn">還沒有收到任何資料推送。</p>`;
@@ -204,10 +278,10 @@ ${decisionsTable(s.decisions)}
 <h2>輸掉的場（所有變體）</h2>
 <div class="table-wrap"><table><thead><tr><th>時間（UTC）</th><th>場</th><th>邊</th><th>價</th><th>剩秒</th><th>進場時距離</th><th>最接近</th><th>損益</th></tr></thead>
 <tbody>${s.losses.length ? s.losses.map((r) => `<tr><td>${esc(r.time)}</td><td>${esc(r.slug)}</td><td>${esc(r.side)}</td><td>${n(r.ask, 2)}</td><td>${n(r.secs_left, 1)}</td><td>${n(r.dist_at_entry, 2)}</td><td>${n(r.min_abs_dist, 2)}</td><td class="bad">${money(r.pnl)}</td></tr>`).join("") : `<tr><td colspan="8" class="good">目前 0 筆</td></tr>`}</tbody></table></div>
-<p class="foot">只讀模擬，不下單。資料區間 ${esc(s.first_row_utc)} → ${esc(s.last_row_utc)}（UTC）。頁面每 60 秒自動重新整理。</p>`;
+<p class="foot">只讀模擬，不下單。資料區間 ${esc(s.first_row_utc)} → ${esc(s.last_row_utc)}（UTC）。即時轉播每 3 秒更新；統計每 2 分鐘。</p>`;
   }
   return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="60"><meta name="robots" content="noindex"><title>${esc(title)}</title>
+<meta name="robots" content="noindex"><title>${esc(title)}</title><script src="/now.js" defer></script>
 <style>
 :root{--bg:#0f1115;--card:#171a21;--line:#262a33;--fg:#e6e8ee;--mut:#8b93a7;--good:#3fb950;--bad:#f85149;--warn:#d29922;--acc:#58a6ff}
 @media (prefers-color-scheme: light){:root{--bg:#f6f7f9;--card:#fff;--line:#e3e6eb;--fg:#1f2328;--mut:#6b7280;--acc:#0969da}}
@@ -220,9 +294,11 @@ table{width:100%;border-collapse:collapse;background:var(--card);border:1px soli
 th,td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}th:first-child,td:first-child{text-align:left}thead th{color:var(--mut);font-weight:500;font-size:12px}
 tbody tr:last-child td{border-bottom:0}table.kv th{text-align:left;color:var(--mut);font-weight:500}.good{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 small{color:var(--mut)}.foot{color:var(--mut);font-size:12px;margin-top:18px}.table-wrap{overflow-x:auto}
+.now{border-color:var(--acc);margin-bottom:14px}.now-head{display:flex;justify-content:space-between;align-items:baseline}.now .big{font-size:18px;margin:6px 0 4px}.now .row{margin:2px 0}
+.now ul{margin:6px 0 0;padding-left:20px}.now li{margin:3px 0}.now ul.ev li{color:var(--fg);font-size:13px}
 table.dec td,table.dec th{text-align:left;font-size:12px;padding:5px 7px;vertical-align:top}table.dec td.skip{color:var(--mut)}table.dec small{display:block;font-size:10px;color:var(--mut)}
 .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin-bottom:10px}.chart{width:100%;height:180px;display:block}
-</style></head><body><main><h1>${esc(title)} <small>Polymarket BTC 5 分鐘盤 · 最後 45 秒買 98~99¢ · 只讀模擬</small></h1>${body}</main></body></html>`;
+</style></head><body><main><h1>${esc(title)} <small>Polymarket BTC 5 分鐘盤 · 即時轉播每 3 秒更新 · 其餘每 2 分鐘</small></h1>${nowBox(nw)}${body}</main></body></html>`;
 }
 
 function html(s) { return new Response(s, { status: 200, headers: { "content-type": "text/html; charset=utf-8", ...SECURITY_HEADERS } }); }

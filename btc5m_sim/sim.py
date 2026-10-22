@@ -16,6 +16,7 @@ import csv, json, os, sys, threading, time, urllib.request, urllib.parse
 from datetime import datetime, timezone, timedelta
 
 from . import live   # phase-1 executor; EXEC_MODE=off keeps it inert
+from . import feed   # live commentary for the dashboard
 
 UA = {"User-Agent": "Mozilla/5.0 btc5m-sim"}
 GAMMA = "https://gamma-api.polymarket.com/events?slug=btc-updown-5m-{}"
@@ -299,6 +300,27 @@ def append_rows(path, fields, rows):
             w.writerow({k: ("" if r.get(k) is None else r.get(k)) for k in fields})
 
 
+def rule_state(v, asks, lead, secs_left, dl_fn, outcomes):
+    """Plain-language state of one rule at this poll, for the live feed."""
+    if v.get("entered"):
+        return f"已買 {v['side']} @{v['ask']}（剩 {v['secs_left']} 秒）"
+    if secs_left > v["window"]:
+        return f"等窗口（最後 {v['window']} 秒才看）"
+    hit = evaluate(asks, v["min_price"], v["_max"], SHARES)
+    if hit is None:
+        if lead is None: return "領先方沒有賣單"
+        if lead > v["_max"]: return f"領先方賣價 {lead:.3f} 高於上限 {v['_max']:.2f}，太貴不買"
+        if lead < v["min_price"]: return f"領先方賣價 {lead:.3f} 低於下限 {v['min_price']:.2f}，不夠確定不買"
+        return f"賣價 {lead:.3f} 在區間，但不足 {SHARES:g} 股"
+    if v["_filt"] is not None:
+        side = outcomes[hit[0]]; dl = dl_fn()
+        if dl is None: return f"賣價 {hit[1]:.3f} 可買，但還沒有現價，不買"
+        side_ok = (dl > 0) if side == "Up" else (dl < 0)
+        if not side_ok: return f"賣價 {hit[1]:.3f} 可買 {side}，但幣價在對面（{dl:+.1f}），不買"
+        if abs(dl) < v["_filt"]: return f"賣價 {hit[1]:.3f} 可買 {side}，但離線只有 {dl:+.1f}（門檻 {v['_filt']:g}），不買"
+    return f"條件成立，準備買 {outcomes[hit[0]]} @{hit[1]:.3f}"
+
+
 def decision_row(v, row):
     """One line per rule per market: bought (with price/time) or skipped with the reason and the numbers behind it."""
     d = dict(slug=v["slug"], start_utc=v["start_utc"], variant=v["variant"], lead_min=v.get("_lead_min"), lead_max=v.get("_lead_max"),
@@ -354,6 +376,7 @@ def watch(start, rows, vrows, lock):
             except Exception:
                 pass
         row["price_to_beat"] = ptb
+        feed.start_market(row["slug"], start)
         seen_asks = []; series = []
         pending = dict(vstate)
         while time.time() < end - LAST_ENTRY:
@@ -400,6 +423,11 @@ def watch(start, rows, vrows, lock):
                         if csamples:
                             v["chain_at_entry"] = csamples[-1][1]; v["chain_age_at_entry"] = round(now - csamples[-1][2])
                         del pending[name]
+                ref = chain_at_start if chain_at_start is not None else spot_at_start
+                dl_now = None if sp is None or ref is None else round(sp - ref, 2)
+                live_set = live.LIVE_VARIANTS or {n for n, *_ in VARIANTS}
+                feed.update(row["slug"], secs_left, asks, m["outcomes"], dl_now, "鏈上開盤價" if chain_at_start is not None else "Coinbase 開盤價",
+                            [(n, rule_state(v, asks, lead, secs_left, lambda: dl_now, m["outcomes"]), n in live_set) for n, v in vstate.items()])
             except Exception as e:
                 row["note"] = f"book error {type(e).__name__}"
             time.sleep(max(0, POLL - (time.time() - t_loop)))
@@ -410,6 +438,20 @@ def watch(start, rows, vrows, lock):
             for v in vstate.values():
                 if not v["entered"]:
                     v["note"] += rng
+        live_set = live.LIVE_VARIANTS or {n for n, *_ in VARIANTS}
+        def summary_lines():
+            out = []
+            for n, v in vstate.items():
+                if n not in live_set: continue
+                d = decision_row(v, row); st = live.status_of(n, row["slug"])
+                if d["decision"] == "buy":
+                    out.append(f"{n}：買 {v['side']} @{v['ask']}（剩 {v['secs_left']} 秒）" + (f"，真單 {st[0]}" if st else "") + (f"，{'對' if v.get('won') == 1 else '錯'}" if v.get("won") in (0, 1) else ""))
+                else:
+                    why = {"no_ask": "整個窗口領先方沒有賣單", "price_out_of_band": f"賣價 {d['lead_min']}–{d['lead_max']} 不在區間", "depth": "深度不夠",
+                           "direction": f"幣價在對面（{d['dl']}）", "distance": f"離線只有 {d['dl']}，門檻 {d['threshold']}", "no_spot": "沒有現價"}.get(d["reason"], d["reason"])
+                    out.append(f"{n}：沒買，{why}")
+            return out
+        feed.finish(row["slug"], summary_lines())
         # wait for resolution
         time.sleep(max(0, end + 60 - time.time()))
         for _ in range(60):
@@ -423,6 +465,7 @@ def watch(start, rows, vrows, lock):
                     for v in vstate.values():
                         v["price_to_beat"] = ptb; score(v, win)
                     live.settle(row["slug"], win)
+                    feed.resolved(row["slug"], win, summary_lines())
                     break
             except Exception:
                 pass
@@ -488,6 +531,7 @@ def main():
     os.makedirs(DATA, exist_ok=True)
     rows, vrows, lock, seen = [], [], threading.Lock(), set()
     exec_mode = live.init(notify=tg, log=log)
+    feed.init(log=log)
     log(f"start: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s; "
         f"variants {[n for n, _, _, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")
     tg((f"🔴 BTC 5m bot 啟動：真單模式（會真的下單）" if exec_mode == "live" else f"🟢 BTC 5m 模擬 bot 啟動（{'dry：算好單但不送' if exec_mode == 'dry' else '不下單'}）")
