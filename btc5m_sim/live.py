@@ -21,6 +21,9 @@ TZ = timezone(timedelta(hours=int(os.getenv("TZ_OFFSET", "8"))))
 LIVE_VARIANTS = {v.strip() for v in os.getenv("LIVE_VARIANTS", "").split(",") if v.strip()}   # empty = every rule incl. "main"
 LIVE_SHARES = float(os.getenv("LIVE_SHARES", "5"))
 MAX_SHARES = float(os.getenv("LIVE_MAX_SHARES", "10"))
+# fish 2026-10-22 16:00: no more "four or five $15 orders on one coin in one market". Per market, at most this many
+# real orders (first rules to fire win the slots). 0 = unlimited.
+MAX_ORDERS_PER_MARKET = int(os.getenv("LIVE_MAX_ORDERS_PER_MARKET", "2"))
 SLIP = float(os.getenv("LIVE_SLIP", "0.01"))                 # pay up to ask + SLIP so a FOK still fills if the book moved
 PRICE_MIN, PRICE_MAX = 0.5, 0.99
 MAX_DAILY_LOSS_VARIANT = float(os.getenv("MAX_DAILY_LOSS_VARIANT", "15"))
@@ -79,7 +82,7 @@ def init(notify=None, log=None):
     _recover_pending()
     if MODE == "live" and WARM_EVERY > 0:
         threading.Thread(target=_keep_warm, daemon=True).start()
-    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} kill={KILL_FILE}"
+    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} max/market={MAX_ORDERS_PER_MARKET} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} kill={KILL_FILE}"
          + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all"))
     if MODE == "live" and not (SIGNER_URL and SIGNER_TOKEN and SIGNER_ADDRESS and API_KEY and API_SECRET and API_PASSPHRASE):
         _log("live: MISSING credentials -> falling back to dry")
@@ -170,9 +173,11 @@ def guard(variant, slug, price, size, mode=None, outcome=None):
     if not (PRICE_MIN <= price <= PRICE_MAX): return False, f"price {price} out of range"
     if size <= 0 or size > MAX_SHARES: return False, f"size {size} out of range"
     if (variant, slug) in _orders: return False, "already ordered this market"
+    same = [r for (v, s), r in _orders.items() if s == slug and r.get("status") in ("", "filled", "dry", "pending")]
     if outcome is not None:
-        held = {r.get("outcome") for (v, s), r in _orders.items() if s == slug and r.get("status") in ("", "filled", "dry", "pending")}
+        held = {r.get("outcome") for r in same}
         if held and outcome not in held: return False, f"opposite side already bought ({'/'.join(sorted(held))})"
+    if MAX_ORDERS_PER_MARKET and len(same) >= MAX_ORDERS_PER_MARKET: return False, f"market already has {len(same)} order(s) (cap {MAX_ORDERS_PER_MARKET})"
     if realised() <= -MAX_DAILY_LOSS_TOTAL: return False, f"total daily loss {realised():+.2f} hit stop"
     if mode == "live":
         bal = wallet_balance()

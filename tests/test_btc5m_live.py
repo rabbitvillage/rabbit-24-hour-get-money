@@ -244,3 +244,20 @@ class OneDirectionPerMarket(unittest.TestCase):
         live._orders[("w120_m99_s40", "btc-updown-5m-1")] = dict(status="", outcome="Up")   # reserved, network call in flight
         self.assertFalse(live.guard("w45_p98_s10", "btc-updown-5m-1", 0.98, 5, mode="dry", outcome="Down")[0])
 
+
+class OrdersPerMarketCap(unittest.TestCase):
+    def setUp(self):
+        live._orders.clear(); self.old = live.MAX_ORDERS_PER_MARKET; live.MAX_ORDERS_PER_MARKET = 2
+    def tearDown(self):
+        live._orders.clear(); live.MAX_ORDERS_PER_MARKET = self.old
+    def test_third_order_same_market_blocked(self):
+        live._orders[("w120_m99_s40", "btc-updown-5m-1")] = dict(status="filled", outcome="Up")
+        self.assertTrue(live.guard("w90_m99_s30", "btc-updown-5m-1", 0.9, 5, mode="dry", outcome="Up")[0])
+        live._orders[("w90_m99_s30", "btc-updown-5m-1")] = dict(status="", outcome="Up")
+        ok, why = live.guard("w60_m95_s20", "btc-updown-5m-1", 0.9, 5, mode="dry", outcome="Up")
+        self.assertFalse(ok); self.assertIn("cap 2", why)
+        self.assertTrue(live.guard("w60_m95_s20", "btc-updown-5m-2", 0.9, 5, mode="dry", outcome="Up")[0])
+    def test_skipped_rows_do_not_count(self):
+        live._orders[("a", "btc-updown-5m-1")] = dict(status="skipped", outcome="Up"); live._orders[("b", "btc-updown-5m-1")] = dict(status="rejected", outcome="Up")
+        self.assertTrue(live.guard("c", "btc-updown-5m-1", 0.9, 5, mode="dry", outcome="Up")[0])
+
