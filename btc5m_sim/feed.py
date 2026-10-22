@@ -15,7 +15,8 @@ FEED_HEARTBEAT = float(os.getenv("FEED_HEARTBEAT", "30"))
 MAX_EVENTS = 8
 
 _lock = threading.Lock()
-_state = {"market": None, "last": None, "events": [], "updated": ""}
+ASSET = os.getenv("ASSET", "btc").strip().lower()
+_state = {"asset": ASSET, "market": None, "last": None, "events": [], "updated": ""}
 _rule_text = {}      # rule -> last state text (to detect changes)
 _dirty = False
 _log = print
@@ -105,7 +106,7 @@ def snapshot():
 
 def _pusher():
     global _dirty
-    url = DASH_URL.rsplit("/", 1)[0] + "/now"
+    url = DASH_URL.rsplit("/", 1)[0] + "/now" + ("" if ASSET == "btc" else f"?asset={ASSET}")
     last_push = 0.0
     while True:
         time.sleep(1)

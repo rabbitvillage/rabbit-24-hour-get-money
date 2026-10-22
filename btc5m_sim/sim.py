@@ -19,10 +19,23 @@ from . import live   # phase-1 executor; EXEC_MODE=off keeps it inert
 from . import feed   # live commentary for the dashboard
 
 UA = {"User-Agent": "Mozilla/5.0 btc5m-sim"}
-GAMMA = "https://gamma-api.polymarket.com/events?slug=btc-updown-5m-{}"
+# One process per asset (ASSET=btc|eth|sol|xrp): same rules, same files layout under its own DATA_DIR.
+ASSET = os.getenv("ASSET", "btc").strip().lower()
+ASSETS = {  # coinbase product, kraken pair + result key, Chainlink aggregator on Polygon, reference price for scaling distance thresholds
+    "btc": dict(cb="BTC-USD", kr=("XBTUSD", "XXBTZUSD"), feed="0xc907E116054Ad103354f2D350FD2514433D57F6f", ref=82000.0),
+    "eth": dict(cb="ETH-USD", kr=("ETHUSD", "XETHZUSD"), feed="0xF9680D99D6C9589e2a93a78A04A279e509205945", ref=2435.0),
+    "sol": dict(cb="SOL-USD", kr=("SOLUSD", "SOLUSD"), feed="0x10C8264C0935b3B9870013e057f330Ff3e9C56dC", ref=105.0),
+    "xrp": dict(cb="XRP-USD", kr=("XRPUSD", "XXRPZUSD"), feed="0x785ba89291f676b5386652eB12b30cF361020694", ref=1.34),
+}
+A = ASSETS.get(ASSET, ASSETS["btc"])
+GAMMA = "https://gamma-api.polymarket.com/events?slug=" + ASSET + "-updown-5m-{}"
 BOOK = "https://clob.polymarket.com/book?token_id={}"
-SPOT_URLS = [("coinbase", "https://api.exchange.coinbase.com/products/BTC-USD/ticker"),   # real-time best bid/ask
-             ("kraken", "https://api.kraken.com/0/public/Ticker?pair=XBTUSD")]
+SPOT_URLS = [("coinbase", f"https://api.exchange.coinbase.com/products/{A['cb']}/ticker"),   # real-time best bid/ask
+             ("kraken", f"https://api.kraken.com/0/public/Ticker?pair={A['kr'][0]}")]
+KRAKEN_KEY = A["kr"][1]
+# Distance thresholds in the variant names are BTC dollars (s10 = $10 at ~$82k). For other assets they scale with price:
+# DIST_SCALE = asset price / 82000, so "s20" means 0.024% of price everywhere. Override with DIST_SCALE env.
+DIST_SCALE = float(os.getenv("DIST_SCALE", "0")) or (A["ref"] / ASSETS["btc"]["ref"])
 
 ENTRY_WINDOW = int(os.getenv("ENTRY_WINDOW", "45"))   # seconds before close to start looking
 LAST_ENTRY = int(os.getenv("LAST_ENTRY", "5"))        # stop looking this many seconds before close
@@ -38,7 +51,7 @@ FEE_RATE = 0.07
 # Chainlink BTC/USD aggregator on Polygon (public, no key). Polymarket resolves on the Chainlink BTC/USD 60s-TWAP *Data Stream*
 # (credentialed, off-chain); the on-chain aggregator is the closest free reference, updated on deviation/heartbeat, not every second.
 CHAIN_RPCS = [u for u in os.getenv("CHAIN_RPCS", "https://polygon-bor-rpc.publicnode.com,https://polygon.drpc.org").split(",") if u.strip()]
-CHAIN_FEED = os.getenv("CHAIN_FEED", "0xc907E116054Ad103354f2D350FD2514433D57F6f")
+CHAIN_FEED = os.getenv("CHAIN_FEED", A["feed"])
 BOOK_WINDOW = int(os.getenv("BOOK_WINDOW", "150"))    # record both sides' best ask every poll from this many seconds before close
 SPOT_WINDOW = int(os.getenv("SPOT_WINDOW", str(BOOK_WINDOW)))  # sample BTC spot from this many seconds before close
 TWAP_WINDOW = 60                                       # resolution = Chainlink TWAP of the last 60s
@@ -63,7 +76,8 @@ def parse_variant(s):
     return s, int(w[1:]), lo, hi, filt
 
 
-VARIANTS = [parse_variant(v) for v in os.getenv("VARIANTS", "w45_p98,w30_p98,w20_p98,w45_p99,w30_p99,w45_p98_s,w45_p98_s10,w45_p98_s20,w45_p98_s30,w60_m95_s10,w60_m95_s20,w90_m99_s30,w120_m99_s40,w45_m99_s20").split(",") if v.strip()]
+VARIANTS_RAW = [parse_variant(v) for v in os.getenv("VARIANTS", "w45_p98,w30_p98,w20_p98,w45_p99,w30_p99,w45_p98_s,w45_p98_s10,w45_p98_s20,w45_p98_s30,w60_m95_s10,w60_m95_s20,w90_m99_s30,w120_m99_s40,w45_m99_s20").split(",") if v.strip()]
+VARIANTS = [(n, w, lo, hi, None if f is None else round(f * DIST_SCALE, 4)) for n, w, lo, hi, f in VARIANTS_RAW]
 
 
 def dist_ok(side, dl, min_abs):
@@ -190,7 +204,7 @@ def spot():
             d, _ = get(url, timeout=3)
             if name == "coinbase":
                 return (float(d["bid"]) + float(d["ask"])) / 2
-            return float(d["result"]["XXBTZUSD"]["c"][0])
+            return float(d["result"][KRAKEN_KEY]["c"][0])
         except Exception:
             continue
     return None
@@ -316,8 +330,8 @@ def rule_state(v, asks, lead, secs_left, dl_fn, outcomes):
         side = outcomes[hit[0]]; dl = dl_fn()
         if dl is None: return f"賣價 {hit[1]:.3f} 可買，但還沒有現價，不買"
         side_ok = (dl > 0) if side == "Up" else (dl < 0)
-        if not side_ok: return f"賣價 {hit[1]:.3f} 可買 {side}，但幣價在對面（{dl:+.1f}），不買"
-        if abs(dl) < v["_filt"]: return f"賣價 {hit[1]:.3f} 可買 {side}，但離線只有 {dl:+.1f}（門檻 {v['_filt']:g}），不買"
+        if not side_ok: return f"賣價 {hit[1]:.3f} 可買 {side}，但幣價在對面（{dl:+.4g}），不買"
+        if abs(dl) < v["_filt"]: return f"賣價 {hit[1]:.3f} 可買 {side}，但離線只有 {dl:+.4g}（門檻 {v['_filt']:.4g}），不買"
     return f"條件成立，準備買 {outcomes[hit[0]]} @{hit[1]:.3f}"
 
 
@@ -343,7 +357,7 @@ def decision_row(v, row):
 # ---------------- one market ----------------
 def watch(start, rows, vrows, lock):
     end = start + 300
-    base = dict(slug=f"btc-updown-5m-{start}", start_utc=datetime.fromtimestamp(start, timezone.utc).isoformat())
+    base = dict(slug=f"{ASSET}-updown-5m-{start}", start_utc=datetime.fromtimestamp(start, timezone.utc).isoformat())
     row = dict(base, entered=0, note="")
     vstate = {n: dict(base, variant=n, window=w, min_price=p, entered=0, note="", _filt=fl, _max=hi) for n, w, p, hi, fl in VARIANTS}
     samples = []
@@ -494,7 +508,7 @@ def watch(start, rows, vrows, lock):
         if row.get("entered"):
             log(f"{row['slug']} buy {row['side']} @{row['ask']} ({row['secs_left']}s left, {row['ask_usd_le_max']}$ on book) -> {row.get('winner')} pnl {row.get('pnl')}")
             if row.get("won") == 0:
-                tg(f"❌ 模擬輸一筆 {row['slug']}\n買 {row['side']} @{row['ask']}，剩 {row['secs_left']}s，結果 {row.get('winner')}，損益 {row.get('pnl')}")
+                tg(f"❌ [{ASSET.upper()}] 模擬輸一筆 {row['slug']}\n買 {row['side']} @{row['ask']}，剩 {row['secs_left']}s，結果 {row.get('winner')}，損益 {row.get('pnl')}")
         else:
             log(f"{row['slug']} no entry {row.get('note','')} winner {row.get('winner')}")
         if vstate:
@@ -532,9 +546,9 @@ def main():
     rows, vrows, lock, seen = [], [], threading.Lock(), set()
     exec_mode = live.init(notify=tg, log=log)
     feed.init(log=log)
-    log(f"start: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s; "
+    log(f"start [{ASSET.upper()}]: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s; dist scale {DIST_SCALE:.4g}; "
         f"variants {[n for n, _, _, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")
-    tg((f"🔴 BTC 5m bot 啟動：真單模式（會真的下單）" if exec_mode == "live" else f"🟢 BTC 5m 模擬 bot 啟動（{'dry：算好單但不送' if exec_mode == 'dry' else '不下單'}）")
+    tg((f"🔴 {ASSET.upper()} 5m bot 啟動：真單模式（會真的下單）" if exec_mode == "live" else f"🟢 {ASSET.upper()} 5m 模擬 bot 啟動（{'dry：算好單但不送' if exec_mode == 'dry' else '不下單'}）")
        + f"\n規則：最後 {ENTRY_WINDOW} 秒，領先方賣價 {MIN_PRICE}~{MAX_PRICE} 就買 {SHARES:g} 股\n"
        f"影子變體：{', '.join(n for n, _, _, _, _ in VARIANTS)}\n下單模式：{exec_mode}" + ("（真單！）" if exec_mode == "live" else "（不送單）"))
     last_hour = int(time.time() // 3600); last_day = datetime.now(TZ).date(); day_start = time.time()
@@ -548,11 +562,11 @@ def main():
         if h != last_hour:
             with lock:
                 msg = summary(rows, now - 3600); vmsg = vsummary(vrows, now - 3600)
-            tg("⏱ 過去一小時\n" + msg + ("\n影子變體\n" + vmsg if VARIANTS else "") + ("\n" + live.summary() if exec_mode != "off" else "")); log("hourly:", msg); last_hour = h
+            tg(f"⏱ [{ASSET.upper()}] 過去一小時\n" + msg + ("\n影子變體\n" + vmsg if VARIANTS else "") + ("\n" + live.summary() if exec_mode != "off" else "")); log("hourly:", msg); last_hour = h
         d = datetime.now(TZ).date()
         if d != last_day:
             with lock:
-                tg(f"📅 {last_day} 全日\n" + summary(rows, day_start) + "\n累計\n" + summary(rows, 0)
+                tg(f"📅 [{ASSET.upper()}] {last_day} 全日\n" + summary(rows, day_start) + "\n累計\n" + summary(rows, 0)
                    + ("\n影子變體（全日）\n" + vsummary(vrows, day_start) if VARIANTS else ""))
             last_day = d; day_start = now
         time.sleep(1)

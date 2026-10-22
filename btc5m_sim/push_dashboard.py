@@ -8,8 +8,9 @@ Run:  python3 -m btc5m_sim.push_dashboard
 import csv, glob, json, os, socket, subprocess, sys, time, urllib.request
 from datetime import datetime, timezone
 
+ASSET = os.getenv("ASSET", "btc").strip().lower()
 DATA = os.getenv("DATA_DIR", os.path.join(os.path.dirname(__file__), "data"))
-SERVICE = os.getenv("SERVICE", "btc5m-sim")
+SERVICE = os.getenv("SERVICE", "btc5m-sim" if ASSET == "btc" else f"btc5m-sim@{ASSET}")
 URL = os.getenv("DASH_URL", "")
 TOKEN = os.getenv("DASH_TOKEN", "")
 
@@ -130,7 +131,7 @@ def decisions(n_markets=12):
     out = []
     for s in slugs[-n_markets:]:
         rs = [r for r in rows if r["slug"] == s]
-        out.append(dict(slug=s.replace("btc-updown-5m-", ""), time=rs[0]["start_utc"][11:16], winner=rs[0]["winner"],
+        out.append(dict(slug=s.replace(f"{ASSET}-updown-5m-", ""), time=rs[0]["start_utc"][11:16], winner=rs[0]["winner"],
                         rules=[dict(name=r["variant"], decision=r["decision"], reason=r["reason"], ask=f(r["ask"]), secs=f(r["secs_left"]),
                                     dl=f(r["dl"]), thr=f(r["threshold"]), lead_min=f(r["lead_min"]), lead_max=f(r["lead_max"]),
                                     live=r["live_status"], won=f(r["won"]), pnl=f(r["pnl"])) for r in rs]))
@@ -151,12 +152,12 @@ def build():
     curve, vanish = book_curve(brows)
     now = time.time(); day = now - 86400
     ent = [r for r in rows if r.get("entered") == "1"]
-    recent = [dict(slug=r["slug"].replace("btc-updown-5m-", ""), time=r["start_utc"][:16].replace("T", " "), side=r["side"], ask=f(r["ask"]),
+    recent = [dict(slug=r["slug"].replace(f"{ASSET}-updown-5m-", ""), time=r["start_utc"][:16].replace("T", " "), side=r["side"], ask=f(r["ask"]),
                    secs_left=f(r["secs_left"]), depth_usd=f(r["ask_usd_le_max"]), winner=r["winner"], won=f(r["won"]), pnl=f(r["pnl"]))
               for r in ent[-10:]][::-1]
     vnames = sorted({r["variant"] for r in vrows}, key=lambda s: (s[1:3], s))
     variants = [dict(name=v, **stats([r for r in vrows if r["variant"] == v])) for v in vnames]
-    losses = [dict(slug=r["slug"].replace("btc-updown-5m-", "") + " " + r["variant"], time=r["start_utc"][:16].replace("T", " "), side=r["side"], ask=f(r["ask"]),
+    losses = [dict(slug=r["slug"].replace(f"{ASSET}-updown-5m-", "") + " " + r["variant"], time=r["start_utc"][:16].replace("T", " "), side=r["side"], ask=f(r["ask"]),
                    secs_left=f(r["secs_left"]), dist_at_entry=f(r.get("dist_at_entry")), min_abs_dist=f(r.get("min_abs_dist")), pnl=f(r["pnl"]))
               for r in vrows if r.get("won") == "0"][-20:][::-1]
     per_market = {}
@@ -171,7 +172,7 @@ def build():
                     chain_err_median=median([abs(f(r.get("chain_ptb_err"))) for r in pm if f(r.get("chain_ptb_err")) is not None]),
                     chain_err_p90=pctl([abs(f(r.get("chain_ptb_err"))) for r in pm if f(r.get("chain_ptb_err")) is not None], 0.9),
                     chain_markets=sum(1 for r in pm if f(r.get("chain_ptb_err")) is not None))
-    return dict(generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), host=socket.gethostname(), service=service_state(),
+    return dict(asset=ASSET, generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"), host=socket.gethostname(), service=service_state(),
                 rule="最後 45 秒，領先方賣價 0.98~0.99，5 股", first_row_utc=rows[0]["start_utc"][:16] if rows else "", last_row_utc=rows[-1]["start_utc"][:16] if rows else "",
                 all=stats(rows), last24h=stats([r for r in rows if ts(r) >= day]), variants=variants, recent=recent, losses=losses, distance=distance,
                 curve=curve, vanish=vanish, decisions=decisions())
@@ -182,7 +183,8 @@ def main():
     if "--print" in sys.argv or not URL:
         print(json.dumps(snap, ensure_ascii=False, indent=1)); return 0
     body = json.dumps(snap, ensure_ascii=False).encode()
-    req = urllib.request.Request(URL, data=body, method="POST", headers={"content-type": "application/json", "authorization": f"Bearer {TOKEN}", "user-agent": "btc5m-push"})
+    url = URL if ASSET == "btc" else URL + f"?asset={ASSET}"
+    req = urllib.request.Request(url, data=body, method="POST", headers={"content-type": "application/json", "authorization": f"Bearer {TOKEN}", "user-agent": "btc5m-push"})
     with urllib.request.urlopen(req, timeout=15) as r:
         print(datetime.now().strftime("%m-%d %H:%M:%S"), "pushed", len(body), "bytes ->", r.status); return 0
 

@@ -5,8 +5,13 @@
 
 import { reportHtml } from "./report.js";
 
+// One simulator per asset pushes here. BTC keeps the original keys; others get "-<asset>" suffixed keys,
+// GET pages at /eth, /sol, /xrp and ?asset= on the JSON/API endpoints. Anything else is rejected.
+const ASSETS = ["btc", "eth", "sol", "xrp"];
 const KEY = "latest";
 const NOW_KEY = "now";
+const keyFor = (base, asset) => (asset === "btc" ? base : `${base}-${asset}`);
+const assetParam = (url) => { const a = url.searchParams.get("asset") || "btc"; return ASSETS.includes(a) ? a : null; };
 const MAX_NOW = 16384;
 const MAX_BODY = 65536;
 const STALE_AFTER_S = 15 * 60;
@@ -23,14 +28,17 @@ const SECURITY_HEADERS = {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (url.pathname === "/") {
+    const pageAsset = url.pathname === "/" ? "btc" : ASSETS.includes(url.pathname.slice(1)) ? url.pathname.slice(1) : null;
+    if (pageAsset) {
       if (request.method !== "GET" && request.method !== "HEAD") return text(405, "method not allowed", { allow: "GET, HEAD" });
-      const [raw, rawNow] = await Promise.all([env.DASH.get(KEY), env.DASH.get(NOW_KEY)]);
-      return html(render(raw ? safeParse(raw) : null, rawNow ? safeParse(rawNow) : null));
+      const [raw, rawNow] = await Promise.all([env.DASH.get(keyFor(KEY, pageAsset)), env.DASH.get(keyFor(NOW_KEY, pageAsset))]);
+      return html(render(raw ? safeParse(raw) : null, rawNow ? safeParse(rawNow) : null, pageAsset));
     }
+    const asset = assetParam(url);
     if (url.pathname === "/now.json") {
       if (request.method !== "GET") return text(405, "method not allowed", { allow: "GET" });
-      const raw = await env.DASH.get(NOW_KEY);
+      if (!asset) return text(400, "bad asset");
+      const raw = await env.DASH.get(keyFor(NOW_KEY, asset));
       return new Response(raw || "{}", { status: 200, headers: { "content-type": "application/json; charset=utf-8", ...SECURITY_HEADERS } });
     }
     if (url.pathname === "/now.js") {
@@ -40,11 +48,12 @@ export default {
     if (url.pathname === "/api/now") {
       if (request.method !== "POST") return text(405, "method not allowed", { allow: "POST" });
       if (!(await authorized(request, env.PUSH_TOKEN))) return text(401, "unauthorized");
+      if (!asset) return text(400, "bad asset");
       const body = await request.text();
       if (body.length > MAX_NOW) return text(413, "too large");
       const parsed = safeParse(body);
       if (!parsed) return text(400, "bad json");
-      await env.DASH.put(NOW_KEY, JSON.stringify(sanitizeNow(parsed)));
+      await env.DASH.put(keyFor(NOW_KEY, asset), JSON.stringify(sanitizeNow(parsed)));
       return text(200, "ok");
     }
     if (url.pathname === "/report") {
@@ -54,6 +63,7 @@ export default {
     if (url.pathname === "/api/push") {
       if (request.method !== "POST") return text(405, "method not allowed", { allow: "POST" });
       if (!(await authorized(request, env.PUSH_TOKEN))) return text(401, "unauthorized");
+      if (!asset) return text(400, "bad asset");
       const len = Number(request.headers.get("content-length") || 0);
       if (len > MAX_BODY) return text(413, "too large");
       const body = await request.text();
@@ -62,7 +72,7 @@ export default {
       if (!parsed) return text(400, "bad json");
       const snap = sanitize(parsed);
       snap.received_at = new Date().toISOString();
-      await env.DASH.put(KEY, JSON.stringify(snap));
+      await env.DASH.put(keyFor(KEY, asset), JSON.stringify(snap));
       return text(200, "ok");
     }
     return text(404, "not found");
@@ -169,7 +179,8 @@ const NOW_JS = `(function(){
     var la=document.getElementById('now-last'); la.replaceChildren();
     if(nw&&nw.last){ var k2=el('div','k','上一場 '+nw.last.window+'｜'+nw.last.result); k2.style.marginTop='8px'; la.appendChild(k2); var u3=el('ul','ev'); (nw.last.lines||[]).forEach(function(e){u3.appendChild(el('li','',e));}); la.appendChild(u3); }
   }
-  function tick(){ fetch('/now.json',{cache:'no-store'}).then(function(r){return r.json();}).then(render).catch(function(){}); }
+  var asset=(document.body.getAttribute('data-asset')||'btc').replace(/[^a-z]/g,'');
+  function tick(){ fetch('/now.json?asset='+asset,{cache:'no-store'}).then(function(r){return r.json();}).then(render).catch(function(){}); }
   setInterval(tick,3000);
 })();`;
 
@@ -222,9 +233,11 @@ function decisionsTable(ds) {
 <p class="sub" style="margin-top:6px">每格＝那條規則在那場的決定。「買 0.980 <small>44s</small> ✓ <small>成交</small>」＝剩 44 秒以 0.98 買、結果對、真單成交；「距離不夠 <small>+4.2 / 10</small>」＝幣價離開盤線 +4.2 美元，門檻 10；「方向不對」＝幣價站在要買的對面；「價格不在區間 <small>0.991–0.995</small>」＝窗口內領先方賣價範圍；「沒賣單」＝領先方整個窗口沒有賣單。真單標記只出現在有真單的規則。</p>`;
 }
 
-function render(s, nw) {
+function render(s, nw, asset = "btc") {
   const now = Date.now();
-  let title = "BTC 5m 模擬 bot — 尚無資料";
+  const sym = asset.toUpperCase();
+  const nav = ASSETS.map((a) => (a === asset ? `<b>${a.toUpperCase()}</b>` : `<a href="${a === "btc" ? "/" : "/" + a}">${a.toUpperCase()}</a>`)).join(" · ");
+  let title = `${sym} 5m 模擬 bot — 尚無資料`;
   let body = `<p class="warn">還沒有收到任何資料推送。</p>`;
   if (s) {
     const recv = Date.parse(s.received_at || "") || 0;
@@ -234,7 +247,7 @@ function render(s, nw) {
     const progress = Math.min(100, Math.round((100 * (s.all.settled || 0)) / 300));
     const lossAll = s.all.settled ? (100 * s.all.losses) / s.all.settled : null;
     const gate = lossAll === null ? "—" : lossAll <= 1 ? `<span class="good">≤1%（可考慮放大）</span>` : lossAll > 1.9 ? `<span class="bad">&gt;1.9%（計畫要求停）</span>` : `<span class="warn">1~1.9%（觀察）</span>`;
-    title = "BTC 5m 模擬 bot";
+    title = `${sym} 5m 模擬 bot`;
     // snapshots pushed by older versions may lack these
     s.curve = Array.isArray(s.curve) ? s.curve : []; s.vanish = s.vanish && typeof s.vanish === "object" ? s.vanish : {};
     s.variants = Array.isArray(s.variants) ? s.variants : []; s.recent = Array.isArray(s.recent) ? s.recent : []; s.losses = Array.isArray(s.losses) ? s.losses : [];
@@ -298,7 +311,7 @@ small{color:var(--mut)}.foot{color:var(--mut);font-size:12px;margin-top:18px}.ta
 .now ul{margin:6px 0 0;padding-left:20px}.now li{margin:3px 0}.now ul.ev li{color:var(--fg);font-size:13px}
 table.dec td,table.dec th{text-align:left;font-size:12px;padding:5px 7px;vertical-align:top}table.dec td.skip{color:var(--mut)}table.dec small{display:block;font-size:10px;color:var(--mut)}
 .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px;margin-bottom:10px}.chart{width:100%;height:180px;display:block}
-</style></head><body><main><h1>${esc(title)} <small>Polymarket BTC 5 分鐘盤 · 即時轉播每 3 秒更新 · 其餘每 2 分鐘</small></h1>${nowBox(nw)}${body}</main></body></html>`;
+</style></head><body data-asset="${esc(asset)}"><main><h1>${esc(title)} <small>Polymarket ${esc(sym)} 5 分鐘盤 · 即時轉播每 3 秒更新 · 其餘每 2 分鐘</small></h1><p class="sub">其他幣種：${nav}（同一套規則、同一個錢包；距離門檻按幣價等比例縮放）</p>${nowBox(nw)}${body}</main></body></html>`;
 }
 
 function html(s) { return new Response(s, { status: 200, headers: { "content-type": "text/html; charset=utf-8", ...SECURITY_HEADERS } }); }

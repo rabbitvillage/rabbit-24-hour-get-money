@@ -161,3 +161,34 @@ class DecisionLog(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AssetParametrisation(unittest.TestCase):
+    """ASSET=eth|sol switches market slug, spot feed, Chainlink aggregator and scales the distance thresholds.
+    importlib.reload mutates the module in place, so each case reads its values before tearDown reloads BTC."""
+    def _load(self, asset):
+        import importlib, os
+        os.environ["ASSET"] = asset
+        importlib.reload(sim)
+        return dict(gamma=sim.GAMMA, spot=sim.SPOT_URLS[0][1], feed=sim.CHAIN_FEED, scale=sim.DIST_SCALE,
+                    s10=next(v for v in sim.VARIANTS if v[0] == "w45_p98_s10")[4])
+
+    def tearDown(self):
+        import importlib, os
+        os.environ.pop("ASSET", None)
+        importlib.reload(sim)
+
+    def test_eth_and_sol(self):
+        for asset, feed, ref in (("eth", "0xF9680D99D6C9589e2a93a78A04A279e509205945", 2435.0), ("sol", "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC", 105.0)):
+            m = self._load(asset)
+            self.assertIn(f"slug={asset}-updown-5m-", m["gamma"])
+            self.assertIn(f"{asset.upper()}-USD", m["spot"])
+            self.assertEqual(m["feed"], feed)
+            self.assertAlmostEqual(m["scale"], ref / 82000.0, places=6)
+            self.assertAlmostEqual(m["s10"], round(10 * ref / 82000.0, 4), places=4)   # $10 at BTC -> same fraction of price
+
+    def test_btc_unchanged(self):
+        m = self._load("btc")
+        self.assertEqual(m["scale"], 1.0)
+        self.assertIn("slug=btc-updown-5m-", m["gamma"])
+        self.assertEqual(m["s10"], 10.0)

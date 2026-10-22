@@ -30,7 +30,8 @@ KILL_FILE = os.getenv("KILL_FILE", os.path.join(DATA, "STOP"))
 MIN_BALANCE_USDC = float(os.getenv("MIN_BALANCE_USDC", "50"))
 BALANCE_TTL = float(os.getenv("BALANCE_TTL", "60"))         # seconds between balance refreshes
 _balance = {"usdc": None, "at": 0.0, "alerted": None}
-SLUG_PREFIX = "btc-updown-5m-"
+ASSET = os.getenv("ASSET", "btc").strip().lower()
+SLUG_PREFIX = f"{ASSET}-updown-5m-"
 CLOB = os.getenv("CLOB_HOST", "https://clob.polymarket.com")
 # Polymarket refuses orders from US IPs (racknerd is in New York). Authenticated exchange calls (POST /order,
 # /auth/derive-api-key, /data/*) go through this HTTP proxy when set — on racknerd it is the local sing-box
@@ -44,7 +45,7 @@ SIGNER_TOKEN = os.getenv("SIGNER_TOKEN", "")
 SIGNER_ADDRESS = os.getenv("SIGNER_ADDRESS", "")             # EOA that signs (POLY_ADDRESS header)
 API_KEY = os.getenv("CLOB_API_KEY", ""); API_SECRET = os.getenv("CLOB_API_SECRET", ""); API_PASSPHRASE = os.getenv("CLOB_API_PASSPHRASE", "")
 DEFAULT_TICK = os.getenv("LIVE_TICK", "0.001")
-GAMMA = "https://gamma-api.polymarket.com/events?slug=btc-updown-5m-{}"
+GAMMA = "https://gamma-api.polymarket.com/events?slug=" + ASSET + "-updown-5m-{}"
 ZERO32 = "0x" + "0" * 64
 UA = {"User-Agent": "btc5m-live"}
 LIVE_ENV = os.getenv("LIVE_ENV_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".live.env"))
@@ -413,7 +414,7 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
             row["status"] = "unfilled" if "fully filled" in err else "rejected"; row["msg"] = err[:160]
         row["msg"] = (row["msg"] + " " + str({k: resp.get(k) for k in ("status", "makingAmount", "takingAmount", "errorMsg")})).strip()
         _log(f"live {row['status']} {variant} {slug} BUY {outcome} {shares}@{price} id={row['order_id'][:12]} {row['msg'][:90]}")
-        _notify(f"{'✅' if row['status']=='filled' else '⚠️'} 真單 {row['status']} {variant}\n{slug} 買 {outcome} {shares:g} 股 @{price}（${usdc:.2f}，剩 {secs_left}s）")
+        _notify(f"{'✅' if row['status']=='filled' else '⚠️'} [{ASSET.upper()}] 真單 {row['status']} {variant}\n{slug} 買 {outcome} {shares:g} 股 @{price}（${usdc:.2f}，剩 {secs_left}s）")
         return row
     except Exception as e:
         row["status"] = row["status"] or "error"; row["msg"] = (row["msg"] + " " + type(e).__name__ + " " + str(e)[:120]).strip()
@@ -441,7 +442,7 @@ def settle(slug, winner):
                                                      size=size, cost=cost, fee=fee, winner=winner, won=won, pnl=pnl, day=day))
             _log(f"live settle {row['status']} {variant} {slug} {row['outcome']} -> {winner} pnl {pnl:+.4f}")
             if row["status"] == "filled":
-                if not won: _notify(f"❌ 真單輸 {variant} {slug}\n買 {row['outcome']} @{row['price']}，結果 {winner}，{pnl:+.2f}")
+                if not won: _notify(f"❌ [{ASSET.upper()}] 真單輸 {variant} {slug}\n買 {row['outcome']} @{row['price']}，結果 {winner}，{pnl:+.2f}")
                 if realised(variant) <= -MAX_DAILY_LOSS_VARIANT and variant not in _stopped:
                     _stopped.add(variant); trips.append(f"⛔ {variant} 今日虧 {realised(variant):+.2f}，已停到明天")
                 if realised() <= -MAX_DAILY_LOSS_TOTAL:
