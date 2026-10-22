@@ -211,7 +211,7 @@ function chart(points, yKey, yMin, yMax, yFmt, color, marks) {
   return `<svg viewBox="0 0 ${W} ${H}" role="img" preserveAspectRatio="none" class="chart"><style>.g{stroke:var(--line);stroke-width:1}.t{fill:var(--mut);font-size:11px}.m{stroke:var(--warn);stroke-dasharray:4 3}</style>${grid}${mk}${xl}${pts.length > 1 ? `<polyline fill="none" stroke="${color}" stroke-width="2" points="${pts.join(" ")}"/>` : ""}</svg>`;
 }
 
-const REASON = { entered: "買", no_ask: "沒賣單", price_out_of_band: "價格不在區間", depth: "深度不夠", direction: "方向不對", distance: "距離不夠", no_spot: "沒現價" };
+const REASON = { entered: "買", no_ask: "沒賣單", price_out_of_band: "價格不在區間", depth: "深度不夠", direction: "方向不對", distance: "距離不夠", no_spot: "沒現價", chop: "震盪盤" };
 const LIVE = { filled: "成交", unfilled: "沒吃到", rejected: "被拒", error: "錯誤", skipped: "", dry: "dry", "": "" };
 function cell(r) {
   if (r.decision === "buy") {
@@ -221,6 +221,7 @@ function cell(r) {
   }
   let why = REASON[r.reason] || esc(r.reason);
   if (r.reason === "distance" || r.reason === "direction") why += `<small>${r.dl === null ? "" : (r.dl > 0 ? "+" : "") + n(r.dl, 1) + " / " + n(r.thr, 0)}</small>`;
+  else if (r.reason === "chop") why += `<small>${r.dl === null ? "" : n(r.dl, 1) + " bps / " + n(r.thr, 0)}</small>`;
   else if (r.reason === "price_out_of_band") why += `<small>${n(r.lead_min, 3)}–${n(r.lead_max, 3)}</small>`;
   else if (r.reason === "depth") why += `<small>${n(r.ask, 3)}</small>`;
   return `<td class="skip">${why}</td>`;

@@ -192,3 +192,35 @@ class AssetParametrisation(unittest.TestCase):
         self.assertEqual(m["scale"], 1.0)
         self.assertIn("slug=btc-updown-5m-", m["gamma"])
         self.assertEqual(m["s10"], 10.0)
+
+
+class ChopFilter(unittest.TestCase):
+    """Entries are refused when the market has already swung >= CHOP_MAX_AMP_BPS of the line before entry."""
+    def test_amp_bps(self):
+        self.assertIsNone(sim.amp_bps(None, None, 81000))
+        self.assertAlmostEqual(sim.amp_bps(81300, 81381, 81000), 10.0, places=6)
+    def test_block_and_pass(self):
+        old = sim.CHOP_MAX_AMP_BPS; sim.CHOP_MAX_AMP_BPS = 8.0
+        try:
+            hit = (1, 0.9, 50.0, 45.0)
+            b = sim.chop_block(hit, 21.9, 89.5)
+            self.assertEqual((b["reason"], b["ask"], b["secs"], b["dl"], b["thr"]), ("chop", 0.9, 89.5, 21.9, 8.0))
+            self.assertIsNone(sim.chop_block(hit, 7.9, 89.5))
+            self.assertIsNone(sim.chop_block(hit, None, 89.5))      # no spot yet -> not blocked by chop
+            self.assertIsNone(sim.chop_block(None, 50.0, 89.5))     # nothing to buy anyway
+            sim.CHOP_MAX_AMP_BPS = 0.0
+            self.assertIsNone(sim.chop_block(hit, 50.0, 89.5))      # 0 = off
+        finally:
+            sim.CHOP_MAX_AMP_BPS = old
+    def test_decision_row_and_state_text(self):
+        v = dict(slug="btc-updown-5m-1", start_utc="2026-10-22T13:50:00+00:00", variant="w90_m99_s30", window=90, min_price=0.8, entered=0, _filt=30.0, _max=0.99,
+                 _block=dict(reason="chop", ask=0.88, secs=89.5, dl=21.9, thr=8.0))
+        d = sim.decision_row(v, dict(winner="Up"))
+        self.assertEqual((d["decision"], d["reason"], d["dl"], d["threshold"]), ("skip", "chop", 21.9, 8.0))
+        old = sim.CHOP_MAX_AMP_BPS; sim.CHOP_MAX_AMP_BPS = 8.0
+        try:
+            txt = sim.rule_state(dict(v, _filt=None), [(0.05, 100, 5), (0.88, 100, 88)], 0.88, 89.5, lambda: -102.0, ["Up", "Down"], lambda: 21.9)
+            self.assertIn("震盪盤", txt)
+        finally:
+            sim.CHOP_MAX_AMP_BPS = old
+

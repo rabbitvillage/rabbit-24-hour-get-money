@@ -80,6 +80,27 @@ VARIANTS_RAW = [parse_variant(v) for v in os.getenv("VARIANTS", "w45_p98,w30_p98
 VARIANTS = [(n, w, lo, hi, None if f is None else round(f * DIST_SCALE, 4)) for n, w, lo, hi, f in VARIANTS_RAW]
 
 
+# Choppy-market filter (2026-10-22 22:30, fish: "I can't keep losing like this until tomorrow"). Losses cluster in markets where the
+# price swung widely before entry: BTC 10-19..10-22, 513 rule entries, blocking entries whose spot range since 150s-left was >= 8 bps
+# of the line removed 11 of 22 losses and lifted net from +$65 to +$121 (15 sh); per day it cost $3-4 on calm days and saved $52 on
+# the choppy one. Measured only from data already seen in this market (no look-ahead). 0 = off.
+CHOP_MAX_AMP_BPS = float(os.getenv("CHOP_MAX_AMP_BPS", "8"))
+
+
+def amp_bps(spot_min, spot_max, ref):
+    """Price range seen so far in this market, in basis points of the reference line. None when nothing to measure."""
+    if spot_min is None or spot_max is None or not ref:
+        return None
+    return (spot_max - spot_min) / ref * 1e4
+
+
+def chop_block(hit, amp, secs_left):
+    """The _block record for a would-be entry refused because the market is choppy, or None when it may proceed."""
+    if hit is None or not CHOP_MAX_AMP_BPS or amp is None or amp < CHOP_MAX_AMP_BPS:
+        return None
+    return dict(reason="chop", ask=hit[1], secs=secs_left, dl=round(amp, 1), thr=CHOP_MAX_AMP_BPS)
+
+
 def dist_ok(side, dl, min_abs):
     """Distance filter: dl = spot now - spot at market open (proxy for priceToBeat). Up needs dl > 0, Down needs dl < 0, and |dl| >= min_abs."""
     if dl is None:
@@ -314,7 +335,7 @@ def append_rows(path, fields, rows):
             w.writerow({k: ("" if r.get(k) is None else r.get(k)) for k in fields})
 
 
-def rule_state(v, asks, lead, secs_left, dl_fn, outcomes):
+def rule_state(v, asks, lead, secs_left, dl_fn, outcomes, amp_fn=lambda: None):
     """Plain-language state of one rule at this poll, for the live feed."""
     if v.get("entered"):
         return f"已買 {v['side']} @{v['ask']}（剩 {v['secs_left']} 秒）"
@@ -332,6 +353,8 @@ def rule_state(v, asks, lead, secs_left, dl_fn, outcomes):
         side_ok = (dl > 0) if side == "Up" else (dl < 0)
         if not side_ok: return f"賣價 {hit[1]:.3f} 可買 {side}，但幣價在對面（{dl:+.4g}），不買"
         if abs(dl) < v["_filt"]: return f"賣價 {hit[1]:.3f} 可買 {side}，但離線只有 {dl:+.4g}（門檻 {v['_filt']:.4g}），不買"
+    amp = amp_fn()
+    if chop_block(hit, amp, secs_left): return f"賣價 {hit[1]:.3f} 可買 {outcomes[hit[0]]}，但這場幣價來回振幅 {amp:.1f} bps ≥ {CHOP_MAX_AMP_BPS:g}（震盪盤），不買"
     return f"條件成立，準備買 {outcomes[hit[0]]} @{hit[1]:.3f}"
 
 
@@ -392,6 +415,7 @@ def watch(start, rows, vrows, lock):
         row["price_to_beat"] = ptb
         feed.start_market(row["slug"], start)
         seen_asks = []; series = []
+        spot_min = spot_max = None          # price range seen since the book window opened (for the chop filter)
         pending = dict(vstate)
         while time.time() < end - LAST_ENTRY:
             t_loop = time.time()
@@ -401,6 +425,10 @@ def watch(start, rows, vrows, lock):
                     b, dt = get(BOOK.format(tok), timeout=5); books.append(b); ms += dt
                 asks = [best_ask(b, MAX_PRICE) for b in books]
                 now = time.time(); secs_left = round(end - now, 1); sp = latest(samples)
+                if sp is not None:
+                    spot_min = sp if spot_min is None else min(spot_min, sp); spot_max = sp if spot_max is None else max(spot_max, sp)
+                ref = chain_at_start if chain_at_start is not None else spot_at_start
+                amp_now = amp_bps(spot_min, spot_max, ref)
                 lead = max((a[0] for a in asks if a[0] is not None), default=None)
                 if lead is not None and secs_left <= ENTRY_WINDOW:  # note range stays about the entry window
                     seen_asks.append(lead)
@@ -408,6 +436,8 @@ def watch(start, rows, vrows, lock):
                                    down_ask=asks[1][0], down_sh=round(asks[1][1], 2), down_usd=round(asks[1][2], 2), spot=sp, fetch_ms=round(ms)))
                 if not row["entered"] and secs_left <= ENTRY_WINDOW:
                     hit = evaluate(asks, MIN_PRICE, MAX_PRICE, SHARES)
+                    if chop_block(hit, amp_now, secs_left):
+                        row["_block"] = chop_block(hit, amp_now, secs_left); hit = None
                     if hit:
                         fill(row, hit, m["outcomes"], asks, secs_left, ms)
                         live.submit("main", m, hit[0], hit[1], secs_left)
@@ -430,6 +460,9 @@ def watch(start, rows, vrows, lock):
                             v["_block"] = dict(reason="distance" if side_ok else ("no_spot" if dl is None else "direction"),
                                                ask=hit[1], secs=secs_left, dl=None if dl is None else round(dl, 2), thr=v["_filt"])
                             hit = None
+                    cb = chop_block(hit, amp_now, secs_left)
+                    if cb:
+                        v["_block"] = cb; hit = None
                     if hit:
                         fill(v, hit, m["outcomes"], asks, secs_left, ms)
                         live.submit(name, m, hit[0], hit[1], secs_left)
@@ -441,7 +474,7 @@ def watch(start, rows, vrows, lock):
                 dl_now = None if sp is None or ref is None else round(sp - ref, 2)
                 live_set = live.LIVE_VARIANTS or {n for n, *_ in VARIANTS}
                 feed.update(row["slug"], secs_left, asks, m["outcomes"], dl_now, "鏈上開盤價" if chain_at_start is not None else "Coinbase 開盤價",
-                            [(n, rule_state(v, asks, lead, secs_left, lambda: dl_now, m["outcomes"]), n in live_set) for n, v in vstate.items()])
+                            [(n, rule_state(v, asks, lead, secs_left, lambda: dl_now, m["outcomes"], lambda: amp_now), n in live_set) for n, v in vstate.items()])
             except Exception as e:
                 row["note"] = f"book error {type(e).__name__}"
             time.sleep(max(0, POLL - (time.time() - t_loop)))
@@ -462,7 +495,8 @@ def watch(start, rows, vrows, lock):
                     out.append(f"{n}：買 {v['side']} @{v['ask']}（剩 {v['secs_left']} 秒）" + (f"，真單 {st[0]}" if st else "") + (f"，{'對' if v.get('won') == 1 else '錯'}" if v.get("won") in (0, 1) else ""))
                 else:
                     why = {"no_ask": "整個窗口領先方沒有賣單", "price_out_of_band": f"賣價 {d['lead_min']}–{d['lead_max']} 不在區間", "depth": "深度不夠",
-                           "direction": f"幣價在對面（{d['dl']}）", "distance": f"離線只有 {d['dl']}，門檻 {d['threshold']}", "no_spot": "沒有現價"}.get(d["reason"], d["reason"])
+                           "direction": f"幣價在對面（{d['dl']}）", "distance": f"離線只有 {d['dl']}，門檻 {d['threshold']}", "no_spot": "沒有現價",
+                           "chop": f"震盪盤，幣價來回振幅 {d['dl']} bps ≥ {d['threshold']:g}"}.get(d["reason"], d["reason"])
                     out.append(f"{n}：沒買，{why}")
             return out
         feed.finish(row["slug"], summary_lines())
