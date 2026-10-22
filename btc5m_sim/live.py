@@ -267,10 +267,12 @@ def _new_conn():
 
 def clob_request(method, path, body=None, headers=None, _retry=True):
     """Exchange call on a pooled, already-open connection (saves the TLS + proxy handshake per order).
-    Returns (status, json). Reconnects once on a dead socket."""
-    try:
-        c = _pool.get_nowait()
-    except queue.Empty:
+    Returns (status, json). Reconnects once on a dead socket. _retry=False also forces a fresh connection."""
+    c = None
+    if _retry:
+        try: c = _pool.get_nowait()
+        except queue.Empty: c = None
+    if c is None:
         c = _new_conn()
     try:
         c.request(method, path, body=body, headers={**UA, "content-type": "application/json", **(headers or {})})
@@ -384,6 +386,11 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
         # 2) POST /order with L2 headers; the body string we sign is exactly the one we send
         body = json.dumps({"order": wire, "orderType": ORDER_TYPE, "owner": API_KEY})
         st, resp = clob_request("POST", "/order", body, l2_headers("POST", "/order", body))
+        if st >= 500 or "internal server error" in str(resp.get("error", "")).lower():
+            # exchange hiccup (13:04 10-22: two orders answered "internal server error" in the same second). The signed
+            # order is still valid, so re-POST it once with fresh L2 headers on a fresh connection; no re-signing needed.
+            time.sleep(0.3); row["msg"] = f"retry after {st} {str(resp)[:60]}; "
+            st, resp = clob_request("POST", "/order", body, l2_headers("POST", "/order", body), _retry=False)
         row["order_id"] = str(resp.get("orderID") or ""); status = str(resp.get("status") or "").lower()
         def _num(k):
             try: return float(resp.get(k) or 0)

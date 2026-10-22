@@ -158,7 +158,7 @@ class FakPartialFill(unittest.TestCase):
 
     def test_partial_fill_books_actual_spend(self):
         sent = {}
-        def fake_post(method, path, body=None, headers=None):
+        def fake_post(method, path, body=None, headers=None, _retry=True):
             sent["body"] = json.loads(body); return 200, {"success": True, "status": "matched", "orderID": "o1", "makingAmount": "6.2", "takingAmount": "6.4"}
         live.clob_request = fake_post
         row = live._submit("w45_p98_s10", market(), 1, 0.98, 30.0, mode="live")          # asked 15 sh -> got 6.4 for $6.20
@@ -168,8 +168,19 @@ class FakPartialFill(unittest.TestCase):
         r = csv.DictReader(open(os.path.join(self.d.name, "live_results.csv"))); row2 = list(r)[0]
         self.assertAlmostEqual(float(row2["pnl"]), -6.2, 3)
 
+    def test_exchange_500_is_retried_once_with_the_same_signed_order(self):
+        calls = []
+        def fake_post(method, path, body=None, headers=None, _retry=True):
+            calls.append((json.loads(body)["order"]["salt"], _retry))
+            return (500, {"error": "internal server error"}) if len(calls) == 1 else (200, {"success": True, "status": "matched", "orderID": "o3", "makingAmount": "14.85", "takingAmount": "15.1"})
+        live.clob_request = fake_post
+        row = live._submit("w60_m95_s20", market(), 0, 0.90, 50.0, mode="live")
+        self.assertEqual(row["status"], "filled"); self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], calls[1][0]); self.assertEqual(calls[1][1], False)     # same order, fresh connection
+        self.assertIn("retry after 500", row["msg"])
+
     def test_zero_fill_is_unfilled(self):
-        live.clob_request = lambda m, p, body=None, headers=None: (200, {"success": True, "status": "unmatched", "orderID": "o2", "makingAmount": "0", "takingAmount": "0"})
+        live.clob_request = lambda m, p, body=None, headers=None, _retry=True: (200, {"success": True, "status": "unmatched", "orderID": "o2", "makingAmount": "0", "takingAmount": "0"})
         row = live._submit("w45_p98_s20", market(), 1, 0.98, 30.0, mode="live")
         self.assertEqual(row["status"], "unfilled")
 
