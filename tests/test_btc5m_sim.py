@@ -224,3 +224,24 @@ class ChopFilter(unittest.TestCase):
         finally:
             sim.CHOP_MAX_AMP_BPS = old
 
+
+class TelegramChats(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(sim.tg_chats("555981860,5891236715"), ["555981860", "5891236715"])
+        self.assertEqual(sim.tg_chats(" 555 ; 555 ,, 42 "), ["555", "42"])
+        self.assertEqual(sim.tg_chats(""), []); self.assertEqual(sim.tg_chats(None), [])
+    def test_send_to_each_chat_and_survive_one_failure(self):
+        sent = []
+        def fake_urlopen(req, timeout=10):
+            body = req.data.decode()
+            if "chat_id=bad" in body: raise OSError("403")
+            sent.append(body); return None
+        old = (sim.urllib.request.urlopen, sim.TG_TOKEN, sim.TG_CHAT)
+        sim.urllib.request.urlopen = fake_urlopen; sim.TG_TOKEN = "t"; sim.TG_CHAT = "a,bad,b"
+        try:
+            sim.tg("hello")
+        finally:
+            sim.urllib.request.urlopen, sim.TG_TOKEN, sim.TG_CHAT = old
+        self.assertEqual(len(sent), 2)
+        self.assertTrue(any("chat_id=a" in s for s in sent) and any("chat_id=b" in s for s in sent))
+

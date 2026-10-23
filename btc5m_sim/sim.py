@@ -161,11 +161,27 @@ def tg(text):
                 os.makedirs(DATA, exist_ok=True); open(chat_file(), "w").write(TG_CHAT)
             except OSError:
                 pass
-        data = urllib.parse.urlencode({"chat_id": TG_CHAT, "text": text}).encode()
-        urllib.request.urlopen(urllib.request.Request(
-            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=data, headers=UA), timeout=10)
+        # TG_CHAT_ID may list several chats, comma separated (2026-10-23 fish: also broadcast to a second user). Each chat
+        # is sent separately so one failure (a user who has not pressed /start) never blocks the others.
+        for chat in tg_chats(TG_CHAT):
+            try:
+                data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
+                urllib.request.urlopen(urllib.request.Request(
+                    f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data=data, headers=UA), timeout=10)
+            except Exception as e:
+                log(f"TG send failed for chat …{str(chat)[-4:]}:", type(e).__name__)
     except Exception as e:  # never let TG kill the sim; never print the token
         log("TG send failed:", type(e).__name__)
+
+
+def tg_chats(value):
+    """'555,5891' -> ['555', '5891']; blanks and duplicates dropped, order kept."""
+    out = []
+    for c in str(value or "").replace(";", ",").split(","):
+        c = c.strip()
+        if c and c not in out:
+            out.append(c)
+    return out
 
 
 # ---------------- market helpers ----------------
