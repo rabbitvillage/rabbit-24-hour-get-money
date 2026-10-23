@@ -179,6 +179,29 @@ class FakPartialFill(unittest.TestCase):
         self.assertEqual(calls[0][0], calls[1][0]); self.assertEqual(calls[1][1], False)     # same order, fresh connection
         self.assertIn("retry after 500", row["msg"])
 
+    def test_timing_row_records_each_step(self):
+        import time as _t
+        def slow_worker(op, payload=None, timeout=8): _t.sleep(0.03); return 200, {"ok": True, "signature": "0xsig", "digest": "0xd"}
+        def slow_post(method, path, body=None, headers=None, _retry=True):
+            _t.sleep(0.02); return 200, {"success": True, "status": "matched", "orderID": "o9", "makingAmount": "13.5", "takingAmount": "35.128206"}
+        live.worker = slow_worker; live.clob_request = slow_post
+        seen = _t.time() - 0.1; called = _t.time()
+        live._submit("w60_m95_s20", market(), 1, 0.88, 56.6, mode="live", seen_at=seen, book_ms=210.4, t_call=called)
+        rows = list(csv.DictReader(open(os.path.join(self.d.name, "live_timing.csv"))))
+        self.assertEqual(len(rows), 1); r = rows[0]
+        self.assertEqual((r["variant"], r["status"], r["book_ms"], r["retried"]), ("w60_m95_s20", "filled", "210", "0"))
+        self.assertAlmostEqual(float(r["fill_avg"]), 0.3843, 3)                    # 13.5 / 35.128 — the 10-23 21:39 SOL fill
+        self.assertGreaterEqual(int(r["book_age_ms"]), 95); self.assertGreaterEqual(int(r["sign_ms"]), 25); self.assertGreaterEqual(int(r["post_ms"]), 15)
+        parts = sum(int(r[k]) for k in ("book_age_ms", "queue_ms", "guard_ms", "tick_ms", "prep_ms", "sign_ms", "post_ms"))
+        self.assertLessEqual(abs(int(r["total_ms"]) - parts), 5)                    # the steps add up to the total
+
+    def test_timing_never_breaks_and_skips_are_not_timed(self):
+        live._orders[("w45_p98_s10", market()["slug"])] = dict(status="filled", outcome="Up")   # opposite side held -> skipped by guard
+        row = live._submit("w45_p98_s20", market(), 1, 0.98, 30.0, mode="live")
+        self.assertEqual(row["status"], "skipped")
+        self.assertFalse(os.path.exists(os.path.join(self.d.name, "live_timing.csv")))
+        live._record_timing({"status": "filled", "cost": "x", "filled_size": "0"}, {}, None, None, None)   # bad input: logged, not raised
+
     def test_zero_fill_is_unfilled(self):
         live.clob_request = lambda m, p, body=None, headers=None, _retry=True: (200, {"success": True, "status": "unmatched", "orderID": "o2", "makingAmount": "0", "takingAmount": "0"})
         row = live._submit("w45_p98_s20", market(), 1, 0.98, 30.0, mode="live")

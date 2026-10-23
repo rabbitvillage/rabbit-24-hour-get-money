@@ -57,6 +57,16 @@ _ident = {}      # {"address": EOA, "proxyWallet": maker} from btc5m_whoami, fet
 OFIELDS = ["ts", "mode", "variant", "slug", "outcome", "token_id", "ask", "price", "size", "tick", "neg_risk",
            "order_type", "status", "order_id", "filled_size", "cost", "secs_left", "msg"]
 RFIELDS = ["ts", "variant", "slug", "outcome", "size", "cost", "fee", "winner", "won", "pnl", "day"]
+# live_timing.csv (2026-10-23, measure only — fish: "只量不改策略"): where the time goes between seeing the book and the
+# exchange's answer. 10-23 21:39 SOL: decided on Down 0.88 at 56.6s, the market flipped to Up 0.64 by 54.5s, the order filled at
+# an average 0.384 -> it landed after the flip. Columns are milliseconds; blank = step not reached (dry run, rejected earlier).
+#   book_ms   fetching both order books (sequential)        book_age_ms  book fetched -> submit() called (evaluation of rules)
+#   queue_ms  submit() -> worker thread running             guard_ms     guard() incl. the cached wallet balance (HTTP when stale)
+#   tick_ms   GET /tick-size                                prep_ms      identity (cached) + building the order
+#   sign_ms   signer Worker round trip                      post_ms      POST /order round trip (incl. one retry on 5xx)
+#   total_ms  book fetched -> exchange answered             fill_avg     USDC spent / shares received (filled orders)
+TFIELDS = ["ts", "variant", "slug", "outcome", "status", "secs_left", "ask", "fill_avg", "book_ms", "book_age_ms", "queue_ms",
+           "guard_ms", "tick_ms", "prep_ms", "sign_ms", "post_ms", "retried", "total_ms"]
 
 _lock = threading.Lock()
 _notify = lambda text: None
@@ -360,12 +370,43 @@ def _append(name, fields, row):
         w.writerow({k: ("" if row.get(k) is None else row.get(k)) for k in fields})
 
 
-def submit(variant, market, side_idx, ask, secs_left, mode=None):
-    """Non-blocking: builds + (live) sends one BUY for `variant` on `market` (dict from sim.market())."""
-    threading.Thread(target=_submit, args=(variant, market, side_idx, ask, secs_left, mode), daemon=True).start()
+def submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, book_ms=None):
+    """Non-blocking: builds + (live) sends one BUY for `variant` on `market` (dict from sim.market()).
+    seen_at / book_ms: when the order books behind this decision were fetched and how long that took (timing only)."""
+    threading.Thread(target=_submit, args=(variant, market, side_idx, ask, secs_left, mode),
+                     kwargs=dict(seen_at=seen_at, book_ms=book_ms, t_call=time.time()), daemon=True).start()
 
 
-def _submit(variant, market, side_idx, ask, secs_left, mode=None):
+def _ms(a, b):
+    return "" if a is None or b is None else round((b - a) * 1000)
+
+
+def _record_timing(row, tm, seen_at, book_ms, t_call):
+    """One line per attempted order in live_timing.csv + a log line. Never raises."""
+    try:
+        end = tm.get("post") or tm.get("sign") or tm.get("tick") or tm.get("guard") or time.time()
+        fill_avg = ""
+        if row.get("status") == "filled":
+            try: fill_avg = round(float(row["cost"]) / float(row["filled_size"]), 4)
+            except (TypeError, ValueError, ZeroDivisionError): fill_avg = ""
+        rec = dict(ts=row.get("ts"), variant=row.get("variant"), slug=row.get("slug"), outcome=row.get("outcome"), status=row.get("status"),
+                   secs_left=row.get("secs_left"), ask=row.get("ask"), fill_avg=fill_avg,
+                   book_ms="" if book_ms is None else round(book_ms), book_age_ms=_ms(seen_at, t_call), queue_ms=_ms(t_call, tm.get("start")),
+                   guard_ms=_ms(tm.get("start"), tm.get("guard")), tick_ms=_ms(tm.get("guard"), tm.get("tick")),
+                   prep_ms=_ms(tm.get("tick"), tm.get("presign")), sign_ms=_ms(tm.get("presign"), tm.get("sign")),
+                   post_ms=_ms(tm.get("sign"), tm.get("post")), retried=tm.get("retried", 0),
+                   total_ms=_ms(seen_at if seen_at is not None else (t_call if t_call is not None else tm.get("start")), end))
+        with _lock:
+            _append("live_timing.csv", TFIELDS, rec)
+        _log(f"live timing {rec['variant']} {rec['slug']} {rec['status']}: total {rec['total_ms']}ms = book {rec['book_ms']} + age {rec['book_age_ms']}"
+             f" + queue {rec['queue_ms']} + guard {rec['guard_ms']} + tick {rec['tick_ms']} + prep {rec['prep_ms']} + sign {rec['sign_ms']} + post {rec['post_ms']}"
+             + (f" fill {fill_avg} vs ask {rec['ask']}" if fill_avg != "" else ""))
+    except Exception as e:
+        _log(f"live timing record failed {type(e).__name__}")
+
+
+def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, book_ms=None, t_call=None):
+    tm = {"start": time.time(), "retried": 0}
     mode = mode or MODE
     slug = market["slug"]; outcome = market["outcomes"][side_idx]; token = market["tokens"][side_idx]
     price = min(PRICE_MAX, round(ask + SLIP, 3)); size = LIVE_SHARES
@@ -374,6 +415,7 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
                filled_size=0, cost=0, secs_left=secs_left, msg="")
     with _lock:
         ok, why = guard(variant, slug, price, size, mode, outcome)
+        tm["guard"] = time.time()
         if not ok:
             row["status"] = "skipped"; row["msg"] = why; _append("live_orders.csv", OFIELDS, row); _last[(variant, slug)] = ("skipped", why)
             _log(f"live skip {variant} {slug} {outcome}@{price}: {why}"); return row
@@ -383,6 +425,7 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
         if mode == "live":
             tick = str(_get(f"{CLOB}/tick-size?token_id={token}").get("minimum_tick_size", DEFAULT_TICK))
             row["tick"] = tick; row["price"] = price = tick_round(price, tick)
+        tm["tick"] = time.time()
         maker, taker, shares, usdc = amounts(price, size, tick)
         row["size"] = shares; row["cost"] = usdc
         if mode != "live":
@@ -395,7 +438,9 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
                      makerAmount=str(maker), takerAmount=str(taker), side=0, signatureType=1,
                      timestamp=str(int(time.time() * 1000)), metadata=ZERO32, builder=ZERO32, negRisk=neg_risk)
         # 1) the Worker re-validates (market, side, price, size, identity, daily cap) and signs; the key never leaves it
+        tm["presign"] = time.time()
         st, signed = worker("btc5m_order", {"order": order, "idempotencyKey": f"{variant}:{slug}", "dry": False})
+        tm["sign"] = time.time()
         if st != 200 or not signed.get("ok") or not signed.get("signature"):
             row["status"] = "rejected"; row["msg"] = f"signer {st} {str(signed.get('reason') or signed)[:140]}"; raise RuntimeError(row["msg"])
         wire = dict(salt=order["salt"], maker=order["maker"], signer=order["signer"], tokenId=order["tokenId"],
@@ -407,8 +452,9 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
         if st >= 500 or "internal server error" in str(resp.get("error", "")).lower():
             # exchange hiccup (13:04 10-22: two orders answered "internal server error" in the same second). The signed
             # order is still valid, so re-POST it once with fresh L2 headers on a fresh connection; no re-signing needed.
-            time.sleep(0.3); row["msg"] = f"retry after {st} {str(resp)[:60]}; "
+            time.sleep(0.3); row["msg"] = f"retry after {st} {str(resp)[:60]}; "; tm["retried"] = 1
             st, resp = clob_request("POST", "/order", body, l2_headers("POST", "/order", body), _retry=False)
+        tm["post"] = time.time()
         row["order_id"] = str(resp.get("orderID") or ""); status = str(resp.get("status") or "").lower()
         def _num(k):
             try: return float(resp.get(k) or 0)
@@ -436,6 +482,7 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None):
             _last[(variant, slug)] = (row["status"], str(row["msg"])[:80])
             if len(_last) > 2000:
                 for k in list(_last)[:1000]: _last.pop(k, None)
+        _record_timing(row, tm, seen_at, book_ms, t_call)
 
 
 def settle(slug, winner):

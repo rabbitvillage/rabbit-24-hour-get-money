@@ -456,7 +456,7 @@ def watch(start, rows, vrows, lock):
                         row["_block"] = chop_block(hit, amp_now, secs_left); hit = None
                     if hit:
                         fill(row, hit, m["outcomes"], asks, secs_left, ms)
-                        live.submit("main", m, hit[0], hit[1], secs_left)
+                        live.submit("main", m, hit[0], hit[1], secs_left, seen_at=now, book_ms=ms)
                 for name in list(pending):
                     v = pending[name]
                     if secs_left > v["window"]:
@@ -481,7 +481,7 @@ def watch(start, rows, vrows, lock):
                         v["_block"] = cb; hit = None
                     if hit:
                         fill(v, hit, m["outcomes"], asks, secs_left, ms)
-                        live.submit(name, m, hit[0], hit[1], secs_left)
+                        live.submit(name, m, hit[0], hit[1], secs_left, seen_at=now, book_ms=ms)
                         v["spot_at_entry"] = sp
                         if csamples:
                             v["chain_at_entry"] = csamples[-1][1]; v["chain_age_at_entry"] = round(now - csamples[-1][2])
