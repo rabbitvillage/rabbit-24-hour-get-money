@@ -1,0 +1,247 @@
+"""Unit tests for the pure helpers in btc5m_sim.sim (no network)."""
+import csv, os, tempfile, unittest
+
+from btc5m_sim import sim
+
+
+class VariantParsing(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(sim.parse_variant("w30_p98"), ("w30_p98", 30, 0.98, 0.99, None))
+        self.assertEqual(sim.parse_variant(" w45_p99 "), ("w45_p99", 45, 0.99, 0.99, None))
+        self.assertEqual(sim.parse_variant("w45_p98_s"), ("w45_p98_s", 45, 0.98, 0.99, 0.0))
+        self.assertEqual(sim.parse_variant("w45_p98_s10"), ("w45_p98_s10", 45, 0.98, 0.99, 10.0))
+        self.assertEqual(sim.parse_variant("w60_m95_s20"), ("w60_m95_s20", 60, 0.8, 0.95, 20.0))   # price cap: favourite at M_FLOOR(0.80)..95c
+
+    def test_cap_variant_picks_favourite_only(self):
+        asks = [(0.91, 300.0, 273.0), (0.10, 2000.0, 200.0)]
+        self.assertEqual(sim.evaluate(asks, 0.8, 0.95, 5), (0, 0.91, 300.0, 273.0))      # Up at 91c qualifies
+        self.assertIsNone(sim.evaluate([(0.97, 300.0, 291.0), (0.03, 10.0, 0.3)], 0.8, 0.95, 5))  # 97c is above the cap
+        self.assertIsNone(sim.evaluate([(0.55, 300.0, 165.0), (0.44, 300.0, 132.0)], 0.8, 0.95, 5))  # 55c "favourite" is a coin flip: below the floor
+
+    def test_defaults(self):
+        names = [n for n, _, _, _, _ in sim.VARIANTS]
+        self.assertEqual(names, ["w45_p98", "w30_p98", "w20_p98", "w45_p99", "w30_p99", "w45_p98_s", "w45_p98_s10", "w45_p98_s20", "w45_p98_s30", "w60_m95_s10", "w60_m95_s20", "w90_m99_s30", "w120_m99_s40", "w45_m99_s20"])
+
+    def test_dist_ok(self):
+        self.assertTrue(sim.dist_ok("Up", 9.4, 0)); self.assertFalse(sim.dist_ok("Down", 9.4, 0))   # the 16:50 loss: Down bought while spot was +9.4
+        self.assertTrue(sim.dist_ok("Down", -12.0, 10)); self.assertFalse(sim.dist_ok("Down", -9.9, 10))
+        self.assertFalse(sim.dist_ok("Up", None, 0)); self.assertFalse(sim.dist_ok("Up", 0.0, 0))
+
+
+class BookLogic(unittest.TestCase):
+    def test_best_ask(self):
+        book = {"asks": [{"price": "0.99", "size": "10"}, {"price": "0.98", "size": "3"}, {"price": "1", "size": "500"}]}
+        ask, sh, usd = sim.best_ask(book, 0.99)
+        self.assertEqual(ask, 0.98); self.assertEqual(sh, 13); self.assertAlmostEqual(usd, 0.98 * 3 + 0.99 * 10)
+        self.assertEqual(sim.best_ask({"asks": []}, 0.99), (None, 0.0, 0.0))
+
+    def test_evaluate_first_matching_side(self):
+        asks = [(0.01, 1000, 10), (0.98, 20, 19.6)]
+        self.assertEqual(sim.evaluate(asks, 0.98, 0.99, 5), (1, 0.98, 20, 19.6))
+        self.assertIsNone(sim.evaluate(asks, 0.99, 0.99, 5))        # 99c-only variant: 98c is too cheap
+        self.assertIsNone(sim.evaluate([(0.98, 4, 3.9), (None, 0, 0)], 0.98, 0.99, 5))  # not enough shares
+        self.assertIsNone(sim.evaluate([(None, 0, 0), (None, 0, 0)], 0.98, 0.99, 5))
+
+    def test_fill_and_score(self):
+        row = dict(entered=0)
+        sim.fill(row, (0, 0.98, 20, 19.6), ["Up", "Down"], [(0.98, 20, 19.6), (0.03, 50, 1.5)], 30.5, 340)
+        self.assertEqual(row["side"], "Up"); self.assertEqual(row["other_side_ask"], 0.03)
+        self.assertAlmostEqual(row["cost"], 0.98 * sim.SHARES, 4)
+        sim.score(row, "Up"); self.assertEqual(row["won"], 1)
+        self.assertAlmostEqual(row["pnl"], sim.SHARES - row["cost"] - row["fee"], 4)
+        sim.score(row, "Down"); self.assertEqual(row["won"], 0)
+        self.assertAlmostEqual(row["pnl"], -row["cost"] - row["fee"], 4)
+        empty = dict(entered=0); sim.score(empty, "Up")
+        self.assertEqual(empty["winner"], "Up"); self.assertNotIn("won", empty)
+
+
+class SpotDistance(unittest.TestCase):
+    def test_dist(self):
+        self.assertEqual(sim.dist(81010.0, 81000.0), 10.0)
+        self.assertIsNone(sim.dist(None, 81000.0)); self.assertIsNone(sim.dist(81000.0, None))
+
+    def test_twap_dist_only_counts_samples_inside_window(self):
+        end = 1000.0; ptb = 100.0
+        samples = [(end - 70, 500.0), (end - 60, 110.0), (end - 30, 120.0), (end - 10, 130.0)]
+        self.assertEqual(sim.twap_dist(samples, end, end - 20, ptb), 15.0)   # (110+120)/2 - 100
+        self.assertEqual(sim.twap_dist(samples, end, end - 5, ptb), 20.0)    # (110+120+130)/3 - 100
+        self.assertIsNone(sim.twap_dist([], end, end - 5, ptb)); self.assertIsNone(sim.twap_dist(samples, end, end - 5, None))
+
+    def test_finalize_dists_backfills_with_late_ptb(self):
+        end = 1000.0; samples = [(end - 60, 110.0), (end - 30, 120.0), (end - 10, 130.0)]
+        v = dict(entered=1, spot_at_window=112.0, spot_at_entry=125.0, _t_entry=end - 20)
+        sim.finalize_dists(v, samples, end, 100.0, 101.5)
+        self.assertEqual((v["spot_at_start"], v["ptb_err"]), (101.5, 1.5))
+        self.assertEqual((v["dist_at_window"], v["dist_at_entry"]), (12.0, 25.0))
+        self.assertEqual(v["twap_dist_at_entry"], 15.0)          # samples at -60 and -30 only
+        self.assertEqual((v["min_abs_dist"], v["spot_samples"]), (10.0, 3))
+        nv = dict(entered=0, spot_at_window=112.0)
+        sim.finalize_dists(nv, samples, end, None, None)         # ptb never published: everything blank
+        self.assertTrue(all(nv[k] is None for k in ("ptb_err", "dist_at_window", "dist_at_entry", "twap_dist_at_entry", "min_abs_dist")))
+        self.assertEqual(nv["spot_samples"], 3)
+
+    def test_min_abs_dist(self):
+        self.assertEqual(sim.min_abs_dist([(0, 105.0), (1, 97.5), (2, 110.0)], 100.0), 2.5)
+        self.assertIsNone(sim.min_abs_dist([], 100.0))
+
+
+class ChainFields(unittest.TestCase):
+    def test_finalize_chain(self):
+        v = dict(chain_at_entry=81580.0)
+        sim.finalize_chain(v, [(1, 81570.0, 100, 1), (2, 81575.0, 130, 2)], 81586.5, 81570.0)
+        self.assertEqual((v["chain_at_start"], v["chain_ptb_err"], v["chain_dist_at_entry"], v["chain_samples"]), (81570.0, -16.5, -6.5, 2))
+        nv = {}; sim.finalize_chain(nv, [], None, None)
+        self.assertEqual((nv["chain_ptb_err"], nv["chain_dist_at_entry"], nv["chain_samples"]), (None, None, 0))
+
+    def test_versioned_path_rotates_on_header_change(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "v.csv")
+            sim.append_rows(p, ["a", "b"], [{"a": 1, "b": 2}])
+            self.assertEqual(sim.versioned_path(p, ["a", "b"]), p)                      # same header: keep appending
+            p2 = sim.versioned_path(p, ["a", "b", "c"]); self.assertTrue(p2.endswith("v_v2.csv"))
+            sim.append_rows(p, ["a", "b", "c"], [{"a": 1, "b": 2, "c": 3}])            # lands in v_v2.csv
+            with open(p) as f: self.assertEqual(f.readline().strip(), "a,b")
+            with open(p2) as f: self.assertEqual(f.readline().strip(), "a,b,c")
+            self.assertEqual(sim.versioned_path(p, ["a", "b", "c"]), p2)               # reuses v2 next time
+
+
+class CsvWriter(unittest.TestCase):
+    def test_append_rows_header_once_and_none_blank(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "v.csv")
+            sim.append_rows(p, ["a", "b"], [{"a": 1, "b": None}]); sim.append_rows(p, ["a", "b"], [{"a": 2}])
+            with open(p) as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual(rows, [{"a": "1", "b": ""}, {"a": "2", "b": ""}])
+
+
+class DashboardCurve(unittest.TestCase):
+    def test_favorite(self):
+        from btc5m_sim import push_dashboard as pd
+        self.assertEqual(pd.favorite(0.98, 500.0, 0.03, 10.0), (0.98, 500.0))
+        self.assertEqual(pd.favorite(0.02, 10.0, 0.97, 300.0), (0.97, 300.0))
+        self.assertEqual(pd.favorite(None, 0.0, 0.01, 5.0), (None, None))      # favourite (Up) has no ask
+        self.assertEqual(pd.favorite(None, 0.0, 0.96, 50.0), (0.96, 50.0))     # only Down quoted, and it is the favourite
+        self.assertEqual(pd.favorite(None, 0.0, None, 0.0), (None, None))
+
+    def test_bucket(self):
+        from btc5m_sim import push_dashboard as pd
+        self.assertEqual([pd.bucket(x) for x in (44.6, 45.0, 45.1, 150.0, 150.4, 4.9, 0.0)], [45, 45, 50, 150, None, 5, None])
+
+    def test_book_curve(self):
+        from btc5m_sim import push_dashboard as pd
+        rows = []
+        def add(slug, secs, ua, da, uu=100.0, du=100.0):
+            rows.append(dict(slug=slug, secs_left=str(secs), up_ask="" if ua is None else str(ua), up_usd=str(uu), down_ask="" if da is None else str(da), down_usd=str(du)))
+        add("m1", 120.0, 0.95, 0.06); add("m1", 100.0, 0.98, 0.03); add("m1", 44.0, None, 0.01)   # asks vanish after 100s
+        add("m2", 120.0, 0.90, 0.11); add("m2", 44.0, 0.99, 0.02); add("m2", 10.0, 0.99, 0.01)   # asks all the way down
+        curve, d = pd.book_curve(rows)
+        b120 = next(c for c in curve if c["secs"] == 120); b45 = next(c for c in curve if c["secs"] == 45)
+        self.assertEqual((b120["markets"], b120["has_ask_pct"], b120["median_ask"]), (2, 100.0, 0.95))
+        self.assertEqual((b45["markets"], b45["has_ask_pct"], b45["median_ask"]), (2, 50.0, 0.99))
+        self.assertEqual((d["markets"], d["never"], d["s60_102"], d["under_30"], d["with_98"]), (2, 0, 1, 1, 2))
+        self.assertEqual(d["vanish_median"], 100.0)
+
+
+class DecisionLog(unittest.TestCase):
+    def test_reasons(self):
+        row = dict(winner="Up")
+        base = dict(slug="btc-updown-5m-1", start_utc="2026-10-22T05:00:00+00:00", variant="w45_p98_s10", entered=0, _filt=10.0)
+        self.assertEqual(sim.decision_row(dict(base, entered=1, ask=0.98, secs_left=44.2, won=1, pnl=0.3), row)["reason"], "entered")
+        d = sim.decision_row(dict(base, _block=dict(reason="distance", ask=0.99, secs=44.2, dl=4.2, thr=10.0), _lead_min=0.98, _lead_max=0.99), row)
+        self.assertEqual((d["decision"], d["reason"], d["dl"], d["threshold"], d["ask"]), ("skip", "distance", 4.2, 10.0, 0.99))
+        self.assertEqual(sim.decision_row(dict(base, _block=dict(reason="direction", ask=0.98, secs=30.0, dl=-7.8, thr=0.0)), row)["reason"], "direction")
+        self.assertEqual(sim.decision_row(dict(base, _lead_min=0.991, _lead_max=0.995), row)["reason"], "price_out_of_band")
+        self.assertEqual(sim.decision_row(dict(base, _lead_min=0.98, _lead_max=0.99, _depth_short=True), row)["reason"], "depth")
+        self.assertEqual(sim.decision_row(dict(base), row)["reason"], "no_ask")
+        sim.live._last[("w45_p98_s10", "btc-updown-5m-1")] = ("filled", "ok")
+        self.assertEqual(sim.decision_row(dict(base, entered=1, ask=0.98, secs_left=44.2), row)["live_status"], "filled")
+        sim.live._last.clear()
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class AssetParametrisation(unittest.TestCase):
+    """ASSET=eth|sol switches market slug, spot feed, Chainlink aggregator and scales the distance thresholds.
+    importlib.reload mutates the module in place, so each case reads its values before tearDown reloads BTC."""
+    def _load(self, asset):
+        import importlib, os
+        os.environ["ASSET"] = asset
+        importlib.reload(sim)
+        return dict(gamma=sim.GAMMA, spot=sim.SPOT_URLS[0][1], feed=sim.CHAIN_FEED, scale=sim.DIST_SCALE,
+                    s10=next(v for v in sim.VARIANTS if v[0] == "w45_p98_s10")[4])
+
+    def tearDown(self):
+        import importlib, os
+        os.environ.pop("ASSET", None)
+        importlib.reload(sim)
+
+    def test_eth_and_sol(self):
+        for asset, feed, ref in (("eth", "0xF9680D99D6C9589e2a93a78A04A279e509205945", 2435.0), ("sol", "0x10C8264C0935b3B9870013e057f330Ff3e9C56dC", 105.0)):
+            m = self._load(asset)
+            self.assertIn(f"slug={asset}-updown-5m-", m["gamma"])
+            self.assertIn(f"{asset.upper()}-USD", m["spot"])
+            self.assertEqual(m["feed"], feed)
+            self.assertAlmostEqual(m["scale"], ref / 82000.0, places=6)
+            self.assertAlmostEqual(m["s10"], round(10 * ref / 82000.0, 4), places=4)   # $10 at BTC -> same fraction of price
+
+    def test_btc_unchanged(self):
+        m = self._load("btc")
+        self.assertEqual(m["scale"], 1.0)
+        self.assertIn("slug=btc-updown-5m-", m["gamma"])
+        self.assertEqual(m["s10"], 10.0)
+
+
+class ChopFilter(unittest.TestCase):
+    """Entries are refused when the market has already swung >= CHOP_MAX_AMP_BPS of the line before entry."""
+    def test_amp_bps(self):
+        self.assertIsNone(sim.amp_bps(None, None, 81000))
+        self.assertAlmostEqual(sim.amp_bps(81300, 81381, 81000), 10.0, places=6)
+    def test_block_and_pass(self):
+        old = sim.CHOP_MAX_AMP_BPS; sim.CHOP_MAX_AMP_BPS = 8.0
+        try:
+            hit = (1, 0.9, 50.0, 45.0)
+            b = sim.chop_block(hit, 21.9, 89.5)
+            self.assertEqual((b["reason"], b["ask"], b["secs"], b["dl"], b["thr"]), ("chop", 0.9, 89.5, 21.9, 8.0))
+            self.assertIsNone(sim.chop_block(hit, 7.9, 89.5))
+            self.assertIsNone(sim.chop_block(hit, None, 89.5))      # no spot yet -> not blocked by chop
+            self.assertIsNone(sim.chop_block(None, 50.0, 89.5))     # nothing to buy anyway
+            sim.CHOP_MAX_AMP_BPS = 0.0
+            self.assertIsNone(sim.chop_block(hit, 50.0, 89.5))      # 0 = off
+        finally:
+            sim.CHOP_MAX_AMP_BPS = old
+    def test_decision_row_and_state_text(self):
+        v = dict(slug="btc-updown-5m-1", start_utc="2026-10-22T13:50:00+00:00", variant="w90_m99_s30", window=90, min_price=0.8, entered=0, _filt=30.0, _max=0.99,
+                 _block=dict(reason="chop", ask=0.88, secs=89.5, dl=21.9, thr=8.0))
+        d = sim.decision_row(v, dict(winner="Up"))
+        self.assertEqual((d["decision"], d["reason"], d["dl"], d["threshold"]), ("skip", "chop", 21.9, 8.0))
+        old = sim.CHOP_MAX_AMP_BPS; sim.CHOP_MAX_AMP_BPS = 8.0
+        try:
+            txt = sim.rule_state(dict(v, _filt=None), [(0.05, 100, 5), (0.88, 100, 88)], 0.88, 89.5, lambda: -102.0, ["Up", "Down"], lambda: 21.9)
+            self.assertIn("震盪盤", txt)
+        finally:
+            sim.CHOP_MAX_AMP_BPS = old
+
+
+class TelegramChats(unittest.TestCase):
+    def test_parse(self):
+        self.assertEqual(sim.tg_chats("555981860,5891236715"), ["555981860", "5891236715"])
+        self.assertEqual(sim.tg_chats(" 555 ; 555 ,, 42 "), ["555", "42"])
+        self.assertEqual(sim.tg_chats(""), []); self.assertEqual(sim.tg_chats(None), [])
+    def test_send_to_each_chat_and_survive_one_failure(self):
+        sent = []
+        def fake_urlopen(req, timeout=10):
+            body = req.data.decode()
+            if "chat_id=bad" in body: raise OSError("403")
+            sent.append(body); return None
+        old = (sim.urllib.request.urlopen, sim.TG_TOKEN, sim.TG_CHAT)
+        sim.urllib.request.urlopen = fake_urlopen; sim.TG_TOKEN = "t"; sim.TG_CHAT = "a,bad,b"
+        try:
+            sim.tg("hello")
+        finally:
+            sim.urllib.request.urlopen, sim.TG_TOKEN, sim.TG_CHAT = old
+        self.assertEqual(len(sent), 2)
+        self.assertTrue(any("chat_id=a" in s for s in sent) and any("chat_id=b" in s for s in sent))
+

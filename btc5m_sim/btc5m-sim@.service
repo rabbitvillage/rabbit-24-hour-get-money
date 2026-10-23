@@ -1,0 +1,21 @@
+# Per-asset instance of the simulator/executor:  systemctl enable --now btc5m-sim@eth
+# Same code, same .env (rules, exec mode, Telegram), same .live.env (wallet creds), same .dash.env (dashboard token).
+# The instance file .asset-<asset>.env is loaded LAST so its ASSET= and DATA_DIR= win over the shared .env.
+# Create it with:  bash btc5m_sim/add_asset.sh eth
+[Unit]
+Description=%i 5m bot (same rules as BTC, own data dir)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/rabbit-24-hour-get-money
+EnvironmentFile=/opt/rabbit-24-hour-get-money/btc5m_sim/.env
+EnvironmentFile=-/opt/rabbit-24-hour-get-money/btc5m_sim/.live.env
+EnvironmentFile=-/opt/rabbit-24-hour-get-money/btc5m_sim/.dash.env
+EnvironmentFile=/opt/rabbit-24-hour-get-money/btc5m_sim/.asset-%i.env
+ExecStart=/usr/bin/env python3 -m btc5m_sim.sim
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

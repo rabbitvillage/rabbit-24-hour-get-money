@@ -1,0 +1,10 @@
+[Unit]
+Description=Push %i 5m sim summary to the dashboard (read-only)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/rabbit-24-hour-get-money
+EnvironmentFile=/opt/rabbit-24-hour-get-money/btc5m_sim/.dash.env
+EnvironmentFile=/opt/rabbit-24-hour-get-money/btc5m_sim/.asset-%i.env
+ExecStart=/usr/bin/env python3 -m btc5m_sim.push_dashboard
