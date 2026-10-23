@@ -24,6 +24,42 @@ MAX_SHARES = float(os.getenv("LIVE_MAX_SHARES", "10"))
 # fish 2026-10-22 16:00: no more "four or five $15 orders on one coin in one market". Per market, at most this many
 # real orders (first rules to fire win the slots). 0 = unlimited.
 MAX_ORDERS_PER_MARKET = int(os.getenv("LIVE_MAX_ORDERS_PER_MARKET", "2"))
+# US stock market session pause (fish 2026-10-24: "美股開盤時段（只有週一到五，考慮夏令時間）BTC、SOL 自動不送真單，程式照跑收資料").
+# Since 15-share sizing, BTC lost 12.7% of real orders (net -$32.84) in Taiwan 21:00-04:00 vs 2.3% (+$117.62) the rest of the day.
+# Regular session = Mon-Fri 09:30-16:00 New York time; the tz database handles daylight saving (EDT: Taiwan 21:30-04:00,
+# EST from 2026-11-02: 22:30-05:00). Listed NYSE holidays are closed all day, listed early closes end at their time.
+# Holidays / early closes must be extended each year (US_MARKET_HOLIDAYS / US_MARKET_EARLY_CLOSE override the defaults).
+PAUSE_US_SESSION = os.getenv("LIVE_PAUSE_US_SESSION", "0").strip().lower() in ("1", "true", "yes", "on")
+US_TZ = os.getenv("US_SESSION_TZ", "America/New_York")
+US_SESSION_START = os.getenv("US_SESSION_START", "09:30")
+US_SESSION_END = os.getenv("US_SESSION_END", "16:00")
+US_HOLIDAYS = {d.strip() for d in os.getenv("US_MARKET_HOLIDAYS", "2026-11-26,2026-12-25").split(",") if d.strip()}
+US_EARLY_CLOSE = {k.strip(): v.strip() for k, v in (x.split("=", 1) for x in os.getenv("US_MARKET_EARLY_CLOSE", "2026-11-27=13:00,2026-12-24=13:00").split(",") if "=" in x)}
+
+
+def _ny(now=None):
+    from zoneinfo import ZoneInfo
+    return (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(US_TZ))
+
+
+def us_session_open(now=None):
+    """True while the US stock market's regular session is open (see PAUSE_US_SESSION). now: an aware datetime (tests)."""
+    t = _ny(now)
+    if t.weekday() >= 5:
+        return False
+    d = t.strftime("%Y-%m-%d")
+    if d in US_HOLIDAYS:
+        return False
+    hm = t.strftime("%H:%M")
+    return US_SESSION_START <= hm < US_EARLY_CLOSE.get(d, US_SESSION_END)
+
+
+def us_session_close_local(now=None):
+    """Today's session close as Taiwan clock time, for messages (e.g. '04:00')."""
+    from zoneinfo import ZoneInfo
+    t = _ny(now); d = t.strftime("%Y-%m-%d"); hh, mm = US_EARLY_CLOSE.get(d, US_SESSION_END).split(":")
+    close = t.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+    return close.astimezone(TZ).strftime("%H:%M")
 SLIP = float(os.getenv("LIVE_SLIP", "0.01"))                 # pay up to ask + SLIP so a FOK still fills if the book moved
 PRICE_MIN, PRICE_MAX = 0.5, 0.99
 MAX_DAILY_LOSS_VARIANT = float(os.getenv("MAX_DAILY_LOSS_VARIANT", "15"))
@@ -102,8 +138,11 @@ def init(notify=None, log=None):
         threading.Thread(target=_keep_warm, daemon=True).start()
     if MODE == "live":
         threading.Thread(target=_balance_loop, daemon=True).start()
+    if MODE == "live" and PAUSE_US_SESSION:
+        threading.Thread(target=_session_loop, daemon=True).start()
     _log(f"live: mode={MODE} shares={LIVE_SHARES:g} max/market={MAX_ORDERS_PER_MARKET} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} kill={KILL_FILE}"
-         + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all"))
+         + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all")
+         + (f" us_pause=on ({US_SESSION_START}-{US_SESSION_END} {US_TZ} Mon-Fri, now {'OPEN -> paused' if us_session_open() else 'closed'})" if PAUSE_US_SESSION else " us_pause=off"))
     if MODE == "live" and not (SIGNER_URL and SIGNER_TOKEN and SIGNER_ADDRESS and API_KEY and API_SECRET and API_PASSPHRASE):
         _log("live: MISSING credentials -> falling back to dry")
         return "dry"
@@ -191,6 +230,25 @@ def _balance_once():
     return wallet_balance(force=True)
 
 
+def _session_loop(every=30.0):
+    """Tell Telegram when the US-session pause starts and ends (once per transition; quiet while the kill file is in place)."""
+    state = us_session_open()
+    while True:
+        time.sleep(every)
+        try:
+            now_open = us_session_open()
+            if now_open == state:
+                continue
+            state = now_open
+            msg = (f"⏸ [{ASSET.upper()}] 美股開盤，真單暫停到收盤（台灣 {us_session_close_local()}），程式照跑收資料" if now_open
+                   else f"▶️ [{ASSET.upper()}] 美股收盤，恢復送真單")
+            _log("live: " + msg)
+            if not os.path.exists(KILL_FILE):
+                _notify(msg)
+        except Exception as e:
+            _log(f"live: session loop error {type(e).__name__}")
+
+
 def _balance_loop():
     while True:
         try: _balance_once()
@@ -223,6 +281,7 @@ def guard(variant, slug, price, size, mode=None, outcome=None):
     mode = mode or MODE
     if mode not in ("dry", "live"): return False, "mode off"
     if os.path.exists(KILL_FILE): return False, "kill file"
+    if PAUSE_US_SESSION and us_session_open(): return False, "US stock session pause"
     if LIVE_VARIANTS and variant not in LIVE_VARIANTS: return False, "rule not enabled"
     if not slug.startswith(SLUG_PREFIX): return False, "not a btc 5m market"
     if not (PRICE_MIN <= price <= PRICE_MAX): return False, f"price {price} out of range"

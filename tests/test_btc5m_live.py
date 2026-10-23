@@ -341,3 +341,50 @@ class OrderSpeedups(unittest.TestCase):
         self.assertEqual(row["tick"], "0.001"); self.assertTrue(any("tick-size" in c for c in self.calls))
         self.assertEqual(live._ticks.get("111"), "0.001")                                # cached for the rest of the market
 
+
+class UsSessionPause(unittest.TestCase):
+    """Mon-Fri 09:30-16:00 New York time, daylight saving via the tz database, holidays and early closes."""
+    from datetime import datetime as _dt, timezone as _tz
+    def at(self, iso): return self._dt.fromisoformat(iso).replace(tzinfo=self._tz.utc)
+
+    def test_session_hours_follow_new_york_time(self):
+        o = live.us_session_open
+        self.assertTrue(o(self.at("2026-10-23T17:26")))     # Fri 13:26 EDT = Sat 01:26 Taiwan: still Friday in New York
+        self.assertFalse(o(self.at("2026-10-23T20:00")))    # Fri 16:00 EDT = Sat 04:00 Taiwan: closed (end exclusive)
+        self.assertFalse(o(self.at("2026-10-23T13:29")))    # 09:29 EDT
+        self.assertTrue(o(self.at("2026-10-23T13:30")))     # 09:30 EDT = 21:30 Taiwan
+        self.assertFalse(o(self.at("2026-10-24T15:00")))    # Saturday
+        self.assertFalse(o(self.at("2026-10-25T15:00")))    # Sunday
+        self.assertTrue(o(self.at("2026-10-26T13:30")))     # Mon 09:30 EDT = 21:30 Taiwan
+
+    def test_daylight_saving_shift(self):
+        o = live.us_session_open
+        self.assertFalse(o(self.at("2026-11-02T13:30")))    # Mon 08:30 EST (would be 09:30 under EDT)
+        self.assertTrue(o(self.at("2026-11-02T14:30")))     # Mon 09:30 EST = 22:30 Taiwan
+        self.assertTrue(o(self.at("2026-11-02T20:59")))     # 15:59 EST = 04:59 Taiwan
+        self.assertFalse(o(self.at("2026-11-02T21:00")))    # 16:00 EST = 05:00 Taiwan
+        self.assertEqual(live.us_session_close_local(self.at("2026-10-23T17:26")), "04:00")
+        self.assertEqual(live.us_session_close_local(self.at("2026-11-02T15:00")), "05:00")
+
+    def test_holidays_and_early_close(self):
+        o = live.us_session_open
+        self.assertFalse(o(self.at("2026-11-26T15:00")))    # Thanksgiving
+        self.assertTrue(o(self.at("2026-11-27T17:30")))     # day after: 12:30 EST open
+        self.assertFalse(o(self.at("2026-11-27T18:00")))    # 13:00 EST early close
+        self.assertFalse(o(self.at("2026-12-25T15:00")))    # Christmas
+
+    def test_guard_pauses_live_orders_only_when_enabled(self):
+        live._orders.clear(); live._daily.clear()
+        d = tempfile.TemporaryDirectory(); live.DATA = d.name; live.KILL_FILE = os.path.join(d.name, "STOP")
+        saved = (live.PAUSE_US_SESSION, live.us_session_open)
+        try:
+            live.us_session_open = lambda now=None: True
+            live.PAUSE_US_SESSION = False
+            self.assertTrue(live.guard("w90_m99_s30", "btc-updown-5m-1", 0.9, 5, mode="dry")[0])
+            live.PAUSE_US_SESSION = True
+            self.assertEqual(live.guard("w90_m99_s30", "btc-updown-5m-1", 0.9, 5, mode="dry"), (False, "US stock session pause"))
+            live.us_session_open = lambda now=None: False
+            self.assertTrue(live.guard("w90_m99_s30", "btc-updown-5m-1", 0.9, 5, mode="dry")[0])
+        finally:
+            live.PAUSE_US_SESSION, live.us_session_open = saved; d.cleanup()
+
