@@ -33,6 +33,14 @@ KILL_FILE = os.getenv("KILL_FILE", os.path.join(DATA, "STOP"))
 MIN_BALANCE_USDC = float(os.getenv("MIN_BALANCE_USDC", "50"))
 BALANCE_TTL = float(os.getenv("BALANCE_TTL", "60"))         # seconds between balance refreshes
 _balance = {"usdc": None, "at": 0.0, "alerted": None}
+# 2026-10-24 order speed-up (fish: "只做送單加速，策略不動"). live_timing showed ~1.85 s from book to exchange, of which
+# ~0.7 s was guard() refreshing the wallet balance inline through the Sofia proxy (every market's first order: the cache
+# had always expired) and ~0.2 s was GET /tick-size. Now a background thread refreshes the balance every BALANCE_REFRESH s;
+# the order guard reads that cache and only fetches inline when it is older than BALANCE_STALE (thread dead). The $50 floor
+# is unchanged. Tick sizes are looked up once per market when its book window opens (prefetch_tick), never in the order path.
+BALANCE_REFRESH = float(os.getenv("BALANCE_REFRESH", "30"))
+BALANCE_STALE = float(os.getenv("BALANCE_STALE", "300"))
+_ticks = {}      # token_id -> tick size string, filled by prefetch_tick() / the first order that had to look it up
 ASSET = os.getenv("ASSET", "btc").strip().lower()
 SLUG_PREFIX = f"{ASSET}-updown-5m-"
 CLOB = os.getenv("CLOB_HOST", "https://clob.polymarket.com")
@@ -92,6 +100,8 @@ def init(notify=None, log=None):
     _recover_pending()
     if MODE == "live" and WARM_EVERY > 0:
         threading.Thread(target=_keep_warm, daemon=True).start()
+    if MODE == "live":
+        threading.Thread(target=_balance_loop, daemon=True).start()
     _log(f"live: mode={MODE} shares={LIVE_SHARES:g} max/market={MAX_ORDERS_PER_MARKET} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} kill={KILL_FILE}"
          + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all"))
     if MODE == "live" and not (SIGNER_URL and SIGNER_TOKEN and SIGNER_ADDRESS and API_KEY and API_SECRET and API_PASSPHRASE):
@@ -154,11 +164,12 @@ def realised(variant=None, day=None):
     return sum(d.values()) if variant is None else d.get(variant, 0.0)
 
 
-def wallet_balance(force=False):
-    """Available USDC in the proxy wallet via the CLOB (authenticated, proxied). Cached BALANCE_TTL seconds.
+def wallet_balance(force=False, max_age=None):
+    """Available USDC in the proxy wallet via the CLOB (authenticated, proxied). Cached max_age (default BALANCE_TTL) seconds.
     Returns None when it cannot be read (then the guard lets orders through: a read failure must not freeze trading)."""
     now = time.time()
-    if not force and _balance["usdc"] is not None and now - _balance["at"] < BALANCE_TTL:
+    ttl = BALANCE_TTL if max_age is None else max_age
+    if not force and _balance["usdc"] is not None and now - _balance["at"] < ttl:
         return _balance["usdc"]
     if not (API_KEY and API_SECRET and API_PASSPHRASE and SIGNER_ADDRESS): return None
     try:
@@ -168,7 +179,41 @@ def wallet_balance(force=False):
         _balance.update(usdc=usdc, at=now)
         return usdc
     except Exception as e:
-        _log(f"live: balance read failed {type(e).__name__}"); return _balance["usdc"]
+        if now - _balance.get("fail_log", 0.0) > 600:            # the background refresh runs every 30 s: log a failure streak once
+            _balance["fail_log"] = now; _log(f"live: balance read failed {type(e).__name__}")
+        return _balance["usdc"]
+
+
+def _balance_once():
+    """One background balance refresh. Skipped while the kill file is present: no order can go out then."""
+    if os.path.exists(KILL_FILE):
+        return None
+    return wallet_balance(force=True)
+
+
+def _balance_loop():
+    while True:
+        try: _balance_once()
+        except Exception: pass
+        time.sleep(BALANCE_REFRESH)
+
+
+def _prefetch_tick_now(market):
+    for tok in market.get("tokens", []):
+        if str(tok) in _ticks: continue
+        try:
+            _ticks[str(tok)] = str(_get(f"{CLOB}/tick-size?token_id={tok}").get("minimum_tick_size", DEFAULT_TICK))
+        except Exception as e:
+            _log(f"live: tick prefetch failed {type(e).__name__}")
+    if len(_ticks) > 400:
+        for k in list(_ticks)[:200]: _ticks.pop(k, None)
+
+
+def prefetch_tick(market):
+    """Look the market's tick size up once, in the background, when its book window opens, so no order waits for it."""
+    if MODE != "live":
+        return
+    threading.Thread(target=_prefetch_tick_now, args=(market,), daemon=True).start()
 
 
 def guard(variant, slug, price, size, mode=None, outcome=None):
@@ -190,7 +235,7 @@ def guard(variant, slug, price, size, mode=None, outcome=None):
     if MAX_ORDERS_PER_MARKET and len(same) >= MAX_ORDERS_PER_MARKET: return False, f"market already has {len(same)} order(s) (cap {MAX_ORDERS_PER_MARKET})"
     if realised() <= -MAX_DAILY_LOSS_TOTAL: return False, f"total daily loss {realised():+.2f} hit stop"
     if mode == "live":
-        bal = wallet_balance()
+        bal = wallet_balance(max_age=BALANCE_STALE)                # cache kept fresh by _balance_loop; inline only if it died
         if bal is not None and bal < MIN_BALANCE_USDC:
             if _balance["alerted"] != today():
                 _balance["alerted"] = today(); _notify(f"⛔ 錢包 USDC ${bal:.2f} 低於下限 ${MIN_BALANCE_USDC:g}，停止下單（回到下限以上自動恢復）")
@@ -423,7 +468,10 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, 
     try:
         tick = DEFAULT_TICK
         if mode == "live":
-            tick = str(_get(f"{CLOB}/tick-size?token_id={token}").get("minimum_tick_size", DEFAULT_TICK))
+            tick = _ticks.get(str(token))
+            if tick is None:                                          # not prefetched (restart mid-market, prefetch failed)
+                tick = str(_get(f"{CLOB}/tick-size?token_id={token}").get("minimum_tick_size", DEFAULT_TICK))
+                _ticks[str(token)] = tick
             row["tick"] = tick; row["price"] = price = tick_round(price, tick)
         tm["tick"] = time.time()
         maker, taker, shares, usdc = amounts(price, size, tick)

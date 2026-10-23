@@ -430,6 +430,7 @@ def watch(start, rows, vrows, lock):
                 pass
         row["price_to_beat"] = ptb
         feed.start_market(row["slug"], start)
+        live.prefetch_tick(m)               # tick size looked up once per market, in the background (order speed-up 10-24)
         seen_asks = []; series = []
         spot_min = spot_max = None          # price range seen since the book window opened (for the chop filter)
         pending = dict(vstate)

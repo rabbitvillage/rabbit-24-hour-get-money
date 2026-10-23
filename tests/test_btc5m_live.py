@@ -141,7 +141,7 @@ class ProxyRouting(unittest.TestCase):
 class FakPartialFill(unittest.TestCase):
     """Live submit with every network call stubbed: FAK partial fills are booked at what was really spent."""
     def setUp(self):
-        live._orders.clear(); live._daily.clear(); live._balance.update(usdc=200.0, at=live.time.time(), alerted=None)
+        live._orders.clear(); live._daily.clear(); live._ticks.clear(); live._balance.update(usdc=200.0, at=live.time.time(), alerted=None)
         self.d = tempfile.TemporaryDirectory(); live.DATA = self.d.name; live.KILL_FILE = os.path.join(self.d.name, "STOP")
         self.notes = []; live._notify = self.notes.append; live._log = lambda *a: None
         self.saved = (live._get, live.identity, live.worker, live.clob_request, live.l2_headers, live.API_KEY, live.API_SECRET, live.API_PASSPHRASE, live.SIGNER_ADDRESS)
@@ -283,4 +283,61 @@ class OrdersPerMarketCap(unittest.TestCase):
     def test_skipped_rows_do_not_count(self):
         live._orders[("a", "btc-updown-5m-1")] = dict(status="skipped", outcome="Up"); live._orders[("b", "btc-updown-5m-1")] = dict(status="rejected", outcome="Up")
         self.assertTrue(live.guard("c", "btc-updown-5m-1", 0.9, 5, mode="dry", outcome="Up")[0])
+
+
+class OrderSpeedups(unittest.TestCase):
+    """10-24: balance refreshed in the background, tick size looked up once per market — the order path waits for neither."""
+    def setUp(self):
+        live._orders.clear(); live._daily.clear(); live._ticks.clear()
+        self.d = tempfile.TemporaryDirectory(); live.DATA = self.d.name; live.KILL_FILE = os.path.join(self.d.name, "STOP")
+        self.notes = []; live._notify = self.notes.append; live._log = lambda *a: None
+        self.saved = (live._get, live.identity, live.worker, live.clob_request, live.l2_headers, live.API_KEY, live.API_SECRET, live.API_PASSPHRASE, live.SIGNER_ADDRESS)
+        live.API_KEY = "k"; live.API_SECRET = base64.urlsafe_b64encode(b"s").decode(); live.API_PASSPHRASE = "p"; live.SIGNER_ADDRESS = "0xabc"
+        self.sizes = (live.LIVE_SHARES, live.MAX_SHARES); live.LIVE_SHARES, live.MAX_SHARES = 15.0, 15.0
+        live.identity = lambda: {"address": "0xabc", "proxyWallet": "0xdef"}
+        live.worker = lambda op, payload=None, timeout=8: (200, {"ok": True, "signature": "0xsig", "digest": "0xd"})
+        live.l2_headers = lambda m, p, b: {}
+        live.clob_request = lambda m, p, body=None, headers=None, _retry=True: (200, {"success": True, "status": "matched", "orderID": "o", "makingAmount": "13.5", "takingAmount": "15.2"})
+        self.calls = []
+    def tearDown(self):
+        (live._get, live.identity, live.worker, live.clob_request, live.l2_headers, live.API_KEY, live.API_SECRET, live.API_PASSPHRASE, live.SIGNER_ADDRESS) = self.saved
+        live.LIVE_SHARES, live.MAX_SHARES = self.sizes
+        live._ticks.clear(); self.d.cleanup(); live._balance.update(usdc=None, at=0.0, alerted=None)
+
+    def _no_network(self, url, **kw):
+        raise AssertionError("order path must not hit the network: " + url)
+
+    def test_guard_uses_the_cached_balance_even_past_the_old_60s_ttl(self):
+        live._get = self._no_network
+        live._balance.update(usdc=42.0, at=live.time.time() - 120, alerted=None)        # 2 min old: used to trigger an inline fetch
+        ok, why = live.guard("main", "btc-updown-5m-1", 0.98, 5, mode="live")
+        self.assertFalse(ok); self.assertIn("below floor", why)                          # the $50 floor still bites
+
+    def test_guard_fetches_inline_only_when_the_cache_is_stale(self):
+        live._get = lambda url, **kw: (self.calls.append(url), {"balance": "60000000"})[1]
+        live._balance.update(usdc=42.0, at=live.time.time() - 400, alerted=None)        # background thread dead for > 5 min
+        self.assertTrue(live.guard("main", "btc-updown-5m-1", 0.98, 5, mode="live")[0])
+        self.assertEqual(live._balance["usdc"], 60.0); self.assertEqual(len(self.calls), 1)
+
+    def test_background_refresh_updates_the_cache_and_pauses_on_kill_file(self):
+        live._get = lambda url, **kw: (self.calls.append(url), {"balance": "171790000"})[1]
+        self.assertAlmostEqual(live._balance_once(), 171.79, 2)
+        open(live.KILL_FILE, "w").close()
+        self.assertIsNone(live._balance_once()); self.assertEqual(len(self.calls), 1)
+
+    def test_prefetched_tick_is_used_without_a_lookup(self):
+        live._get = lambda url, **kw: (self.calls.append(url), {"minimum_tick_size": "0.01"})[1]
+        live._prefetch_tick_now(market())
+        self.assertEqual(len(self.calls), 2); self.assertEqual(live._ticks, {"111": "0.01", "222": "0.01"})
+        live._balance.update(usdc=200.0, at=live.time.time(), alerted=None)
+        live._get = self._no_network
+        row = live._submit("w60_m95_s20", market(), 0, 0.90, 50.0, mode="live")
+        self.assertEqual((row["status"], row["tick"]), ("filled", "0.01"))
+
+    def test_tick_is_still_looked_up_when_not_prefetched(self):
+        live._get = lambda url, **kw: (self.calls.append(url), {"minimum_tick_size": "0.001"})[1]
+        live._balance.update(usdc=200.0, at=live.time.time(), alerted=None)
+        row = live._submit("w60_m95_s20", market(), 0, 0.90, 50.0, mode="live")
+        self.assertEqual(row["tick"], "0.001"); self.assertTrue(any("tick-size" in c for c in self.calls))
+        self.assertEqual(live._ticks.get("111"), "0.001")                                # cached for the rest of the market
 
