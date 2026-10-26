@@ -17,6 +17,7 @@ from datetime import datetime, timezone, timedelta
 
 from . import live   # phase-1 executor; EXEC_MODE=off keeps it inert
 from . import feed   # live commentary for the dashboard
+from . import feeds  # websocket spot + order book (2026-10-26); REST stays as the fallback
 
 UA = {"User-Agent": "Mozilla/5.0 btc5m-sim"}
 # One process per asset (ASSET=btc|eth|sol|xrp): same rules, same files layout under its own DATA_DIR.
@@ -42,7 +43,11 @@ LAST_ENTRY = int(os.getenv("LAST_ENTRY", "5"))        # stop looking this many s
 MIN_PRICE = float(os.getenv("MIN_PRICE", "0.98"))
 MAX_PRICE = float(os.getenv("MAX_PRICE", "0.99"))
 SHARES = float(os.getenv("SHARES", "5"))
-POLL = float(os.getenv("POLL", "1.0"))
+POLL = float(os.getenv("POLL", "0.5"))                 # 1.0 -> 0.5 s once the websocket feeds made each poll free of network calls
+USE_WS = os.getenv("USE_WS", "1").strip().lower() in ("1", "true", "yes", "on")
+WS_STALE = float(os.getenv("WS_STALE", "2.5"))          # seconds; older websocket data -> use REST for that poll
+_spot_feed = None                                        # feeds.SpotFeed, started in main()
+_ws_stats = {"book_ws": 0, "book_rest": 0, "spot_ws": 0, "spot_rest": 0}
 DATA = os.getenv("DATA_DIR", "data")
 TG_TOKEN = os.getenv("TG_TOKEN", "")
 TG_CHAT = os.getenv("TG_CHAT_ID", "")
@@ -235,7 +240,12 @@ def score(target, win):
 
 # ---------------- BTC spot (for distance to priceToBeat) ----------------
 def spot():
-    """Current BTC/USD from the first source that answers. Returns price or None."""
+    """Current BTC/USD: the websocket mid when fresh, else the first REST source that answers. Returns price or None."""
+    if _spot_feed is not None:
+        px, age = _spot_feed.get()
+        if px is not None and age <= WS_STALE:
+            _ws_stats["spot_ws"] += 1; return px
+    _ws_stats["spot_rest"] += 1
     for name, url in SPOT_URLS:
         try:
             d, _ = get(url, timeout=3)
@@ -257,7 +267,7 @@ def sample_spot(end, samples):
         p = spot()
         if p:
             samples.append((t0, p))
-        time.sleep(max(0, 1.0 - (time.time() - t0)))
+        time.sleep(max(0, (0.5 if _spot_feed is not None else 1.0) - (time.time() - t0)))
 
 
 def chainlink():
@@ -405,6 +415,7 @@ def watch(start, rows, vrows, lock):
     threading.Thread(target=sample_spot, args=(end, samples), daemon=True).start()
     ptb = None; series = []; csamples = []
     threading.Thread(target=sample_chain, args=(end, csamples), daemon=True).start()
+    bf = None
     spot_at_start = spot()
     chain_at_start, chain_up_at_start, _ = chainlink()   # the line, as the oracle saw it at open (closest free proxy for priceToBeat)  # proxy for priceToBeat (Chainlink at open), which gamma publishes only after close
     try:
@@ -422,6 +433,10 @@ def watch(start, rows, vrows, lock):
                 v["note"] = "market not found"
             return
         ptb = m["ptb"]
+        bf = None
+        if USE_WS:
+            try: bf = feeds.BookFeed(m["tokens"]); bf.start()
+            except Exception as e: log(f"book ws start failed {type(e).__name__}"); bf = None
         poll_from = max([ENTRY_WINDOW, BOOK_WINDOW] + [w for _, w, _, _, _ in VARIANTS])
         while time.time() < end - poll_from:
             time.sleep(min(1, max(0, end - poll_from - time.time())))
@@ -441,7 +456,11 @@ def watch(start, rows, vrows, lock):
             try:
                 books, ms = [], 0
                 for tok in m["tokens"]:
-                    b, dt = get(BOOK.format(tok), timeout=5); books.append(b); ms += dt
+                    b, age = bf.book_now(tok) if bf is not None else (None, float("inf"))
+                    if b is not None and age <= WS_STALE:
+                        books.append(b); ms += age * 1000; _ws_stats["book_ws"] += 1
+                    else:
+                        b, dt = get(BOOK.format(tok), timeout=5); books.append(b); ms += dt; _ws_stats["book_rest"] += 1
                 asks = [best_ask(b, MAX_PRICE) for b in books]
                 now = time.time(); secs_left = round(end - now, 1); sp = latest(samples)
                 if sp is not None:
@@ -556,6 +575,9 @@ def watch(start, rows, vrows, lock):
                 v["note"] += " unresolved after 30m"
     finally:
         row["_t"] = time.time()
+        if bf is not None:
+            try: bf.stop()
+            except Exception: pass
         for v in vstate.values():
             v["_t"] = row["_t"]; finalize_dists(v, samples, end, ptb, spot_at_start); finalize_chain(v, csamples, ptb, chain_at_start)
         decisions = [decision_row(v, row) for v in vstate.values()]
@@ -636,6 +658,12 @@ def main():
     rows, vrows, lock, seen = [], [], threading.Lock(), set()
     exec_mode = live.init(notify=tg, log=log)
     feed.init(log=log)
+    global _spot_feed
+    if USE_WS:
+        try:
+            _spot_feed = feeds.SpotFeed(A["cb"]); _spot_feed.start(); log(f"ws feeds on: spot {A['cb']} via Coinbase ws, order books via Polymarket ws, REST fallback after {WS_STALE:g}s")
+        except Exception as e:
+            log(f"ws spot feed unavailable ({type(e).__name__}); REST only"); _spot_feed = None
     log(f"start [{ASSET.upper()}]: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s; dist scale {DIST_SCALE:.4g}; "
         f"variants {[n for n, _, _, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")
     tg((f"🔴 {ASSET.upper()} 5m bot 啟動：真單模式（會真的下單）" if exec_mode == "live" else f"🟢 {ASSET.upper()} 5m 模擬 bot 啟動（{'dry：算好單但不送' if exec_mode == 'dry' else '不下單'}）")
@@ -652,7 +680,9 @@ def main():
         if h != last_hour:
             with lock:
                 msg = summary(rows, now - 3600); vmsg = vsummary(vrows, now - 3600)
-            tg(f"⏱ [{ASSET.upper()}] 過去一小時\n" + msg + ("\n影子變體\n" + vmsg if VARIANTS else "") + ("\n" + live.summary() if exec_mode != "off" else "")); log("hourly:", msg); last_hour = h
+            ws_line = (f"\n即時資料：盤口 ws {_ws_stats['book_ws']}／REST {_ws_stats['book_rest']}，幣價 ws {_ws_stats['spot_ws']}／REST {_ws_stats['spot_rest']}" if USE_WS else "")
+            for k in _ws_stats: _ws_stats[k] = 0
+            tg(f"⏱ [{ASSET.upper()}] 過去一小時\n" + msg + ws_line + ("\n影子變體\n" + vmsg if VARIANTS else "") + ("\n" + live.summary() if exec_mode != "off" else "")); log("hourly:", msg); last_hour = h
         d = datetime.now(TZ).date()
         if d != last_day:
             with lock:
