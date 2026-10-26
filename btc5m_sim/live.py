@@ -21,6 +21,11 @@ TZ = timezone(timedelta(hours=int(os.getenv("TZ_OFFSET", "8"))))
 LIVE_VARIANTS = {v.strip() for v in os.getenv("LIVE_VARIANTS", "").split(",") if v.strip()}   # empty = every rule incl. "main"
 LIVE_SHARES = float(os.getenv("LIVE_SHARES", "5"))
 MAX_SHARES = float(os.getenv("LIVE_MAX_SHARES", "10"))
+# Size from the wallet (fish 2026-10-26: "我們沒有時間了"): each order ~ LIVE_WALLET_FRACTION of equity (free USDC + unsettled
+# orders), so profits grow the size immediately and losses shrink it. Never below the exchange minimum, never above MAX_SHARES.
+SIZE_MODE = os.getenv("LIVE_SIZE_MODE", "fixed").strip().lower()      # fixed | wallet
+WALLET_FRACTION = float(os.getenv("LIVE_WALLET_FRACTION", "0.125"))
+MIN_SHARES = float(os.getenv("LIVE_MIN_SHARES", "5"))
 # fish 2026-10-22 16:00: no more "four or five $15 orders on one coin in one market". Per market, at most this many
 # real orders (first rules to fire win the slots). 0 = unlimited.
 MAX_ORDERS_PER_MARKET = int(os.getenv("LIVE_MAX_ORDERS_PER_MARKET", "2"))
@@ -200,7 +205,7 @@ def init(notify=None, log=None):
         threading.Thread(target=_balance_loop, daemon=True).start()
     if MODE == "live" and PAUSE_US_SESSION:
         threading.Thread(target=_session_loop, daemon=True).start()
-    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} max/market={MAX_ORDERS_PER_MARKET} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} warn ${MIN_BALANCE_WARN:g} cooldown {COOLDOWN_MARKETS} mkts kill={KILL_FILE}"
+    _log(f"live: mode={MODE} shares={LIVE_SHARES:g}{f' (wallet x{WALLET_FRACTION:g}, {MIN_SHARES:g}-{MAX_SHARES:g})' if SIZE_MODE == 'wallet' else ''} max/market={MAX_ORDERS_PER_MARKET} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} warn ${MIN_BALANCE_WARN:g} cooldown {COOLDOWN_MARKETS} mkts kill={KILL_FILE}"
          + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all")
          + (f" us_pause=on ({US_SESSION_START}-{US_SESSION_END} {US_TZ} Mon-Fri, now {'OPEN -> paused' if us_session_open() else 'closed'})" if PAUSE_US_SESSION else " us_pause=off"))
     if MODE == "live" and not (SIGNER_URL and SIGNER_TOKEN and SIGNER_ADDRESS and API_KEY and API_SECRET and API_PASSPHRASE):
@@ -290,6 +295,17 @@ def _balance_once():
     bal = wallet_balance(force=True)
     _warn_low(bal)
     return bal
+
+
+def order_shares(price):
+    """Shares for the next order: LIVE_SHARES in fixed mode; in wallet mode equity x LIVE_WALLET_FRACTION / price."""
+    if SIZE_MODE != "wallet":
+        return LIVE_SHARES
+    bal = _balance.get("usdc")
+    if bal is None:
+        return min(LIVE_SHARES, MAX_SHARES)
+    sh = (bal + _pending_cost()) * WALLET_FRACTION / max(price, 0.01)
+    return round(max(MIN_SHARES, min(MAX_SHARES, sh)), 2)
 
 
 def _pending_cost():
@@ -595,7 +611,7 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, 
     tm = {"start": time.time(), "retried": 0}
     mode = mode or MODE
     slug = market["slug"]; outcome = market["outcomes"][side_idx]; token = market["tokens"][side_idx]
-    price = min(PRICE_MAX, round(ask + SLIP, 3)); size = LIVE_SHARES
+    price = min(PRICE_MAX, round(ask + SLIP, 3)); size = order_shares(price)
     row = dict(ts=datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"), mode=mode, variant=variant, slug=slug, outcome=outcome, token_id=token,
                ask=ask, price=price, size=size, tick=DEFAULT_TICK, neg_risk=market.get("negRisk", ""), order_type=ORDER_TYPE, status="", order_id="",
                filled_size=0, cost=0, secs_left=secs_left, msg="")

@@ -446,3 +446,25 @@ class LossCooldown(unittest.TestCase):
         live.COOLDOWN_MARKETS = 0
         self.assertFalse(live.note_market("btc-updown-5m-7", [(90, "Up", 0)]))
 
+
+class WalletSizing(unittest.TestCase):
+    def setUp(self):
+        live._orders.clear(); self.old = (live.SIZE_MODE, live.WALLET_FRACTION, live.MIN_SHARES, live.MAX_SHARES, live.LIVE_SHARES)
+        live.SIZE_MODE, live.WALLET_FRACTION, live.MIN_SHARES, live.MAX_SHARES, live.LIVE_SHARES = "wallet", 0.125, 5.0, 60.0, 5.0
+    def tearDown(self):
+        (live.SIZE_MODE, live.WALLET_FRACTION, live.MIN_SHARES, live.MAX_SHARES, live.LIVE_SHARES) = self.old
+        live._orders.clear(); live._balance.update(usdc=None, at=0.0)
+    def test_size_follows_the_wallet(self):
+        live._balance.update(usdc=121.0, at=live.time.time())
+        self.assertAlmostEqual(live.order_shares(0.92), 16.44, 2)                       # $121 x 1/8 / 0.92
+        live._orders[("w60_m95_s20", "x")] = dict(status="filled", cost=14.0)            # money in play counts as equity
+        self.assertAlmostEqual(live.order_shares(0.92), round(135 * 0.125 / 0.92, 2), 2)
+    def test_floor_cap_and_fixed_mode(self):
+        live._balance.update(usdc=21.0, at=live.time.time()); self.assertEqual(live.order_shares(0.92), 5.0)
+        live._balance.update(usdc=1000.0, at=live.time.time()); self.assertEqual(live.order_shares(0.92), 60.0)
+        live.SIZE_MODE = "fixed"; self.assertEqual(live.order_shares(0.92), 5.0)
+    def test_amounts_stay_valid_for_wallet_sizes(self):
+        for sh in (5.0, 7.31, 16.44, 33.9, 60.0):
+            for p in (0.82, 0.9, 0.97, 0.99):
+                self.assertGreaterEqual(live.amounts(p, sh, "0.01")[2], 5.0)
+
