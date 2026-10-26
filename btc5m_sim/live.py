@@ -85,6 +85,9 @@ MAX_DAILY_LOSS_TOTAL = float(os.getenv("MAX_DAILY_LOSS_TOTAL", "50"))
 KILL_FILE = os.getenv("KILL_FILE", os.path.join(DATA, "STOP"))
 # Capital floor (fish 2026-10-22: no daily volume cap; only stop when the wallet's USDC drops below this).
 MIN_BALANCE_USDC = float(os.getenv("MIN_BALANCE_USDC", "50"))
+# Early warning (fish 2026-10-26, wallet down to ~$34): one Telegram a day when equity = free USDC + money sitting in
+# not-yet-settled orders drops below this. Equity, not free USDC, so money locked in open markets does not raise false alarms.
+MIN_BALANCE_WARN = float(os.getenv("MIN_BALANCE_WARN", "0"))
 BALANCE_TTL = float(os.getenv("BALANCE_TTL", "60"))         # seconds between balance refreshes
 _balance = {"usdc": None, "at": 0.0, "alerted": None}
 # 2026-10-24 order speed-up (fish: "只做送單加速，策略不動"). live_timing showed ~1.85 s from book to exchange, of which
@@ -158,7 +161,7 @@ def init(notify=None, log=None):
         threading.Thread(target=_balance_loop, daemon=True).start()
     if MODE == "live" and PAUSE_US_SESSION:
         threading.Thread(target=_session_loop, daemon=True).start()
-    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} max/market={MAX_ORDERS_PER_MARKET} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} kill={KILL_FILE}"
+    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} max/market={MAX_ORDERS_PER_MARKET} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} warn ${MIN_BALANCE_WARN:g} kill={KILL_FILE}"
          + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all")
          + (f" us_pause=on ({US_SESSION_START}-{US_SESSION_END} {US_TZ} Mon-Fri, now {'OPEN -> paused' if us_session_open() else 'closed'})" if PAUSE_US_SESSION else " us_pause=off"))
     if MODE == "live" and not (SIGNER_URL and SIGNER_TOKEN and SIGNER_ADDRESS and API_KEY and API_SECRET and API_PASSPHRASE):
@@ -245,7 +248,25 @@ def _balance_once():
     """One background balance refresh. Skipped while the kill file is present: no order can go out then."""
     if os.path.exists(KILL_FILE):
         return None
-    return wallet_balance(force=True)
+    bal = wallet_balance(force=True)
+    _warn_low(bal)
+    return bal
+
+
+def _pending_cost():
+    with _lock:
+        return sum(float(r.get("cost") or 0) for r in _orders.values() if r.get("status") == "filled")
+
+
+def _warn_low(bal):
+    """Telegram once a day when equity falls under MIN_BALANCE_WARN (the floor itself still stops buying)."""
+    if not MIN_BALANCE_WARN or bal is None:
+        return
+    pending = _pending_cost(); equity = bal + pending
+    if equity < MIN_BALANCE_WARN and _balance.get("warned") != today():
+        _balance["warned"] = today()
+        _notify(f"⚠️ [{ASSET.upper()}] 錢包預警：可用 ${bal:.2f}＋未結算 ${pending:.2f}＝${equity:.2f}，低於預警線 ${MIN_BALANCE_WARN:g}；"
+                f"可用低於 ${MIN_BALANCE_USDC:g} 會自動停買")
 
 
 def _session_loop(every=30.0):

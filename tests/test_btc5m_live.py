@@ -404,3 +404,17 @@ class ReviewBlocks(unittest.TestCase):
         open(os.path.join(self.d.name, "PAUSE_UNTIL"), "w").write(str(int(live.time.time()) - 10))
         self.assertTrue(live.guard("w60_m95_s20", "btc-updown-5m-2", 0.9, 5, mode="dry")[0])
 
+
+class LowBalanceWarning(unittest.TestCase):
+    def setUp(self):
+        live._orders.clear(); live._balance.update(usdc=None, at=0.0, alerted=None, warned=None)
+        self.d = tempfile.TemporaryDirectory(); live.DATA = self.d.name; live.KILL_FILE = os.path.join(self.d.name, "STOP")
+        self.notes = []; live._notify = self.notes.append; self.old = live.MIN_BALANCE_WARN; live.MIN_BALANCE_WARN = 22.0
+    def tearDown(self):
+        live.MIN_BALANCE_WARN = self.old; live._orders.clear(); self.d.cleanup(); live._balance.update(usdc=None, at=0.0, alerted=None, warned=None)
+    def test_warns_once_a_day_on_equity(self):
+        live._orders[("w60_m95_s20", "btc-updown-5m-1")] = dict(status="filled", cost=4.5, outcome="Up")
+        live._warn_low(18.0); self.assertEqual(self.notes, [])                       # 18 free + 4.5 in play = 22.5: fine
+        live._warn_low(15.0); self.assertEqual(len(self.notes), 1); self.assertIn("19.50", self.notes[0])
+        live._warn_low(12.0); self.assertEqual(len(self.notes), 1)                   # once a day
+
