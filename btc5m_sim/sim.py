@@ -12,7 +12,7 @@ Output: data/sim_trades.csv  (main rule, schema unchanged)
 
 Run:  python3 -m btc5m_sim.sim            (env: see .env.example)
 """
-import csv, json, os, sys, threading, time, urllib.request, urllib.parse
+import csv, glob, json, os, sys, threading, time, urllib.request, urllib.parse
 from datetime import datetime, timezone, timedelta
 
 from . import live   # phase-1 executor; EXEC_MODE=off keeps it inert
@@ -382,6 +382,8 @@ def decision_row(v, row):
         d.update(decision="buy", reason="entered", ask=v["ask"], secs_left=v["secs_left"])
     elif v.get("_block"):
         b = v["_block"]; d.update(decision="skip", reason=b["reason"], ask=b["ask"], secs_left=b["secs"], dl=b["dl"], threshold=b["thr"])
+    elif v.get("_expensive"):
+        e = v["_expensive"]; d.update(decision="skip", reason=f"too_expensive:{e['side']}", ask=e["ask"], secs_left=e["secs"])
     elif v.get("_depth_short"):
         d.update(decision="skip", reason="depth", ask=v.get("_lead_min"), secs_left="")
     elif v.get("_lead_min") is not None:
@@ -466,6 +468,16 @@ def watch(start, rows, vrows, lock):
                         v["spot_at_window"] = sp
                     if lead is not None:                 # favourite's best ask seen inside this rule's window (for the "why not" log)
                         v["_lead_min"] = min(v.get("_lead_min", lead), lead); v["_lead_max"] = max(v.get("_lead_max", lead), lead)
+                    if lead is not None and lead > v["_max"] and "_expensive" not in v:
+                        # Deliberately passed (fish 2026-10-26): the favourite was already above this rule's price cap while
+                        # everything else (direction, distance, calm market) would have allowed a buy. Recorded once per rule
+                        # with the side and price, so after settlement we know what letting it go cost or saved.
+                        li = max(range(len(asks)), key=lambda i: asks[i][0] if asks[i][0] is not None else -1)
+                        ref_e = chain_at_start if chain_at_start is not None else spot_at_start
+                        dl_e = None if sp is None or ref_e is None else sp - ref_e
+                        ok_dist = v["_filt"] is None or dist_ok(m["outcomes"][li], dl_e, v["_filt"])
+                        if ok_dist and not chop_block((li, lead), amp_bps(spot_min, spot_max, ref_e), secs_left):
+                            v["_expensive"] = dict(side=m["outcomes"][li], ask=lead, secs=secs_left)
                     hit = evaluate(asks, v["min_price"], v["_max"], SHARES)
                     if hit is None and lead is not None and v["min_price"] <= lead <= v["_max"]:
                         v["_depth_short"] = True         # price was in band but fewer than SHARES on the book
@@ -572,6 +584,30 @@ def watch(start, rows, vrows, lock):
 
 
 # ---------------- summaries ----------------
+def passed_summary(day=None, shares=15.0, variants=None):
+    """Markets the live rules let go because the favourite was already above the price cap, and what buying would have done.
+    day: 'YYYY-MM-DD' (Taiwan) or None = all. Returns (markets, would_win, would_lose, pnl_if_bought) or None when no data."""
+    variants = variants or live.LIVE_VARIANTS or {n for n, *_ in VARIANTS}
+    best = {}
+    for p in sorted(glob.glob(os.path.join(DATA, "sim_decisions*.csv"))):
+        with open(p, newline="") as f:
+            for r in csv.DictReader(f):
+                if not r.get("reason", "").startswith("too_expensive:") or r.get("variant") not in variants or r.get("winner") not in ("Up", "Down"):
+                    continue
+                if day and datetime.fromisoformat(r["start_utc"]).astimezone(TZ).strftime("%Y-%m-%d") != day:
+                    continue
+                try: ask = float(r["ask"]); secs = float(r["secs_left"] or 0)
+                except ValueError: continue
+                k = r["slug"]
+                if k not in best or secs > best[k][2]:             # earliest look per market
+                    best[k] = (r["reason"].split(":", 1)[1], ask, secs, r["winner"])
+    if not best:
+        return None
+    win = sum(1 for side, ask, _, w in best.values() if side == w)
+    pnl = sum((shares * (1 - ask) if side == w else -shares * ask) for side, ask, _, w in best.values())
+    return len(best), win, len(best) - win, round(pnl, 2)
+
+
 def summary(rows, since):
     rs = [r for r in rows if r.get("_t", 0) >= since] if since else rows
     n = len(rs); ent = [r for r in rs if r.get("entered")]
@@ -620,7 +656,9 @@ def main():
         d = datetime.now(TZ).date()
         if d != last_day:
             with lock:
+                ps = passed_summary(last_day)
                 tg(f"📅 [{ASSET.upper()}] {last_day} 全日\n" + summary(rows, day_start) + "\n累計\n" + summary(rows, 0)
+                   + (f"\n太貴放過 {ps[0]} 場：若照買 贏 {ps[1]} 輸 {ps[2]}，約 {ps[3]:+.2f}（15 股）" if ps else "")
                    + ("\n影子變體（全日）\n" + vsummary(vrows, day_start) if VARIANTS else ""))
             last_day = d; day_start = now
         time.sleep(1)

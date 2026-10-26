@@ -245,3 +245,24 @@ class TelegramChats(unittest.TestCase):
         self.assertEqual(len(sent), 2)
         self.assertTrue(any("chat_id=a" in s for s in sent) and any("chat_id=b" in s for s in sent))
 
+
+class PassedTooExpensive(unittest.TestCase):
+    def test_decision_row_and_summary(self):
+        import tempfile, os, csv
+        v = dict(slug="btc-updown-5m-1", start_utc="2026-10-26T05:15:00+00:00", variant="w60_m95_s20", window=60, min_price=0.8, entered=0, _filt=20.0, _max=0.95,
+                 _lead_min=0.99, _lead_max=0.99, _expensive=dict(side="Down", ask=0.99, secs=60.0))
+        d = sim.decision_row(v, dict(winner="Down"))
+        self.assertEqual((d["decision"], d["reason"], d["ask"], d["secs_left"]), ("skip", "too_expensive:Down", 0.99, 60.0))
+        with tempfile.TemporaryDirectory() as tmp:
+            old = sim.DATA; sim.DATA = tmp
+            try:
+                with open(os.path.join(tmp, "sim_decisions.csv"), "w", newline="") as f:
+                    w = csv.DictWriter(f, sim.DFIELDS); w.writeheader()
+                    w.writerow(dict(d, winner="Down")); w.writerow(dict(d, slug="btc-updown-5m-2", winner="Up"))
+                    w.writerow(dict(d, slug="btc-updown-5m-2", variant="w45_m95_s20", secs_left=45.0, winner="Up"))
+                ps = sim.passed_summary("2026-10-26", variants={"w60_m95_s20", "w45_m95_s20"})
+                self.assertEqual(ps[:3], (2, 1, 1)); self.assertAlmostEqual(ps[3], 15 * 0.01 - 15 * 0.99, 2)
+                self.assertIsNone(sim.passed_summary("2026-10-25", variants={"w60_m95_s20"}))
+            finally:
+                sim.DATA = old
+

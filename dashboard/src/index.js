@@ -211,7 +211,7 @@ function chart(points, yKey, yMin, yMax, yFmt, color, marks) {
   return `<svg viewBox="0 0 ${W} ${H}" role="img" preserveAspectRatio="none" class="chart"><style>.g{stroke:var(--line);stroke-width:1}.t{fill:var(--mut);font-size:11px}.m{stroke:var(--warn);stroke-dasharray:4 3}</style>${grid}${mk}${xl}${pts.length > 1 ? `<polyline fill="none" stroke="${color}" stroke-width="2" points="${pts.join(" ")}"/>` : ""}</svg>`;
 }
 
-const REASON = { entered: "買", no_ask: "沒賣單", price_out_of_band: "價格不在區間", depth: "深度不夠", direction: "方向不對", distance: "距離不夠", no_spot: "沒現價", chop: "震盪盤" };
+const REASON = { entered: "買", no_ask: "沒賣單", price_out_of_band: "價格不在區間", depth: "深度不夠", direction: "方向不對", distance: "距離不夠", no_spot: "沒現價", chop: "震盪盤", too_expensive: "太貴放過" };
 const LIVE = { filled: "成交", unfilled: "沒吃到", rejected: "被拒", error: "錯誤", skipped: "", dry: "dry", "": "" };
 function cell(r) {
   if (r.decision === "buy") {
@@ -219,7 +219,9 @@ function cell(r) {
     const res = r.won === 1 ? "✓" : r.won === 0 ? "✗" : "";
     return `<td class="${r.won === 0 ? "bad" : "good"}">買 ${n(r.ask, 3)}<small>${n(r.secs, 0)}s</small> ${res} ${live}</td>`;
   }
-  let why = REASON[r.reason] || esc(r.reason);
+  const tooExp = typeof r.reason === "string" && r.reason.startsWith("too_expensive");
+  let why = tooExp ? REASON.too_expensive : (REASON[r.reason] || esc(r.reason));
+  if (tooExp) why += `<small>${esc(r.reason.split(":")[1] || "")} ${n(r.ask, 2)} ${n(r.secs, 0)}s</small>`;
   if (r.reason === "distance" || r.reason === "direction") why += `<small>${r.dl === null ? "" : (r.dl > 0 ? "+" : "") + n(r.dl, 1) + " / " + n(r.thr, 0)}</small>`;
   else if (r.reason === "chop") why += `<small>${r.dl === null ? "" : n(r.dl, 1) + " bps / " + n(r.thr, 0)}</small>`;
   else if (r.reason === "price_out_of_band") why += `<small>${n(r.lead_min, 3)}–${n(r.lead_max, 3)}</small>`;
