@@ -42,6 +42,48 @@ US_HOLIDAYS = {d.strip() for d in os.getenv("US_MARKET_HOLIDAYS", "2026-11-26,20
 US_EARLY_CLOSE = {k.strip(): v.strip() for k, v in (x.split("=", 1) for x in os.getenv("US_MARKET_EARLY_CLOSE", "2026-11-27=13:00,2026-12-24=13:00").split(",") if "=" in x)}
 
 
+# Scheduled-event pause (fish 2026-10-26: "排程事件停單，行事曆用設定檔維護"). EVENTS_FILE lines:
+#   <start ISO local time> <IANA tz> <minutes before> <minutes after> <label…>
+#   2026-10-28T14:00 America/New_York 30 120 FOMC 利率決議＋記者會
+# Real orders stop from start-before to start+after. Blank lines and # comments ignored. The file is re-read when it changes
+# (no restart). Bad lines are skipped and logged once. 0 effect when the file is missing.
+EVENTS_FILE = os.getenv("EVENTS_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "events.txt"))
+_events = {"mtime": None, "items": [], "bad": set()}
+
+
+def load_events(path=None, now=None):
+    """Parsed calendar as a list of (start_utc, end_utc, label); cached on the file's mtime."""
+    from zoneinfo import ZoneInfo
+    path = path or EVENTS_FILE
+    try: mtime = os.path.getmtime(path)
+    except OSError:
+        _events.update(mtime=None, items=[]); return []
+    if _events["mtime"] == mtime:
+        return _events["items"]
+    items = []
+    for ln, raw in enumerate(open(path, encoding="utf-8"), 1):
+        s = raw.strip()
+        if not s or s.startswith("#"): continue
+        try:
+            when, tz, before, after, *label = s.split()
+            start = datetime.fromisoformat(when).replace(tzinfo=ZoneInfo(tz))
+            items.append((start - timedelta(minutes=float(before)), start + timedelta(minutes=float(after)), " ".join(label) or when))
+        except Exception as e:
+            if (path, ln) not in _events["bad"]:
+                _events["bad"].add((path, ln)); _log(f"live: events.txt line {ln} ignored ({type(e).__name__}): {s[:60]}")
+    _events.update(mtime=mtime, items=items)
+    return items
+
+
+def event_pause(now=None):
+    """Label of the scheduled event whose window covers now, else None."""
+    now = now or datetime.now(timezone.utc)
+    for start, end, label in load_events():
+        if start <= now < end:
+            return label
+    return None
+
+
 def _ny(now=None):
     from zoneinfo import ZoneInfo
     return (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(US_TZ))
@@ -203,8 +245,10 @@ def init(notify=None, log=None):
         threading.Thread(target=_keep_warm, daemon=True).start()
     if MODE == "live":
         threading.Thread(target=_balance_loop, daemon=True).start()
-    if MODE == "live" and PAUSE_US_SESSION:
+    if MODE == "live" and (PAUSE_US_SESSION or os.path.exists(EVENTS_FILE)):
         threading.Thread(target=_session_loop, daemon=True).start()
+    if os.path.exists(EVENTS_FILE):
+        _log(f"live: events calendar {EVENTS_FILE}: {len(load_events())} 個事件" + (f"，現在暫停中：{event_pause()}" if event_pause() else ""))
     _log(f"live: mode={MODE} shares={LIVE_SHARES:g}{f' (wallet x{WALLET_FRACTION:g}, {MIN_SHARES:g}-{MAX_SHARES:g})' if SIZE_MODE == 'wallet' else ''} max/market={MAX_ORDERS_PER_MARKET} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} warn ${MIN_BALANCE_WARN:g} cooldown {COOLDOWN_MARKETS} mkts kill={KILL_FILE}"
          + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all")
          + (f" us_pause=on ({US_SESSION_START}-{US_SESSION_END} {US_TZ} Mon-Fri, now {'OPEN -> paused' if us_session_open() else 'closed'})" if PAUSE_US_SESSION else " us_pause=off"))
@@ -324,18 +368,28 @@ def _warn_low(bal):
                 f"可用低於 ${MIN_BALANCE_USDC:g} 會自動停買")
 
 
+def _pause_state():
+    """(kind, text) of the schedule pause in force: US session, a calendar event, or none."""
+    if PAUSE_US_SESSION and us_session_open():
+        return "us", f"美股開盤，真單暫停到收盤（台灣 {us_session_close_local()}）"
+    ev = event_pause()
+    if ev:
+        end = next((e for s, e, l in load_events() if l == ev and s <= datetime.now(timezone.utc) < e), None)
+        return "event", f"排程事件「{ev}」，真單暫停到 {end.astimezone(TZ).strftime('%H:%M') if end else '事件結束'}（台灣）"
+    return None, ""
+
+
 def _session_loop(every=30.0):
-    """Tell Telegram when the US-session pause starts and ends (once per transition; quiet while the kill file is in place)."""
-    state = us_session_open()
+    """Tell Telegram when a schedule pause (US session or calendar event) starts and ends; quiet while the kill file is in place."""
+    state = _pause_state()[0]
     while True:
         time.sleep(every)
         try:
-            now_open = us_session_open()
-            if now_open == state:
+            kind, text = _pause_state()
+            if kind == state:
                 continue
-            state = now_open
-            msg = (f"⏸ [{ASSET.upper()}] 美股開盤，真單暫停到收盤（台灣 {us_session_close_local()}），程式照跑收資料" if now_open
-                   else f"▶️ [{ASSET.upper()}] 美股收盤，恢復送真單")
+            state = kind
+            msg = (f"⏸ [{ASSET.upper()}] {text}，程式照跑收資料" if kind else f"▶️ [{ASSET.upper()}] 暫停結束，恢復送真單")
             _log("live: " + msg)
             if not os.path.exists(KILL_FILE):
                 _notify(msg)
@@ -376,6 +430,8 @@ def guard(variant, slug, price, size, mode=None, outcome=None):
     if mode not in ("dry", "live"): return False, "mode off"
     if os.path.exists(KILL_FILE): return False, "kill file"
     if PAUSE_US_SESSION and us_session_open(): return False, "US stock session pause"
+    ev = event_pause()
+    if ev: return False, f"event pause: {ev}"
     rb = review_block(variant)
     if rb: return False, rb
     cu = cooldown_until() if COOLDOWN_MARKETS else 0

@@ -468,3 +468,29 @@ class WalletSizing(unittest.TestCase):
             for p in (0.82, 0.9, 0.97, 0.99):
                 self.assertGreaterEqual(live.amounts(p, sh, "0.01")[2], 5.0)
 
+
+class EventCalendarPause(unittest.TestCase):
+    from datetime import datetime as _dt, timezone as _tz
+    def setUp(self):
+        self.d = tempfile.TemporaryDirectory(); self.f = os.path.join(self.d.name, "events.txt"); self.old = live.EVENTS_FILE; live.EVENTS_FILE = self.f
+        live._events.update(mtime=None, items=[], bad=set()); live._orders.clear(); live.DATA = self.d.name; live.KILL_FILE = os.path.join(self.d.name, "STOP")
+        with open(self.f, "w", encoding="utf-8") as fh:
+            fh.write("# test\n2026-10-28T14:00 America/New_York 30 120 FOMC 利率決議\n2026-10-30T08:00 UTC 30 60 選擇權到期\nbad line here\n")
+    def tearDown(self): live.EVENTS_FILE = self.old; live._events.update(mtime=None, items=[], bad=set()); self.d.cleanup()
+    def at(self, iso): return self._dt.fromisoformat(iso).replace(tzinfo=self._tz.utc)
+    def test_windows_and_bad_lines(self):
+        self.assertEqual(len(live.load_events()), 2)                                   # bad line skipped
+        self.assertEqual(live.event_pause(self.at("2026-10-28T17:45")), "FOMC 利率決議")   # 13:45 EDT: 15 min before
+        self.assertEqual(live.event_pause(self.at("2026-10-28T19:59")), "FOMC 利率決議")   # 15:59 EDT
+        self.assertIsNone(live.event_pause(self.at("2026-10-28T20:00")))                 # 16:00 EDT: window closed
+        self.assertEqual(live.event_pause(self.at("2026-10-30T08:30")), "選擇權到期")
+        self.assertIsNone(live.event_pause(self.at("2026-10-29T12:00")))
+    def test_guard_blocks_during_event_and_reloads_on_edit(self):
+        saved = live.event_pause; live.event_pause = lambda now=None: "FOMC 利率決議"
+        try: self.assertEqual(live.guard("w60_m95_s20", "btc-updown-5m-1", 0.9, 5, mode="dry"), (False, "event pause: FOMC 利率決議"))
+        finally: live.event_pause = saved
+        import time as _t; _t.sleep(0.01)
+        with open(self.f, "w", encoding="utf-8") as fh: fh.write("2026-11-06T08:30 America/New_York 15 45 非農就業\n")
+        os.utime(self.f, None); self.assertEqual([l for s, e, l in live.load_events()], ["非農就業"])
+        self.assertEqual(live.event_pause(self.at("2026-11-06T13:20")), "非農就業")       # 08:20 EST (DST over)
+
