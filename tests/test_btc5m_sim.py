@@ -266,3 +266,15 @@ class PassedTooExpensive(unittest.TestCase):
             finally:
                 sim.DATA = old
 
+
+class PeriodParam(unittest.TestCase):
+    def test_15m_slug_and_window(self):
+        import importlib, os
+        os.environ["PERIOD"] = "900"
+        try:
+            importlib.reload(sim)
+            self.assertEqual(sim.PERIOD, 900); self.assertEqual(sim.SLUG_LABEL, "15m"); self.assertIn("-updown-15m-", sim.GAMMA)
+        finally:
+            os.environ.pop("PERIOD", None); importlib.reload(sim)
+        self.assertEqual(sim.SLUG_LABEL, "5m")
+

@@ -131,7 +131,7 @@ def decisions(n_markets=12):
     out = []
     for s in slugs[-n_markets:]:
         rs = [r for r in rows if r["slug"] == s]
-        out.append(dict(slug=s.replace(f"{ASSET}-updown-5m-", ""), time=rs[0]["start_utc"][11:16], winner=rs[0]["winner"],
+        out.append(dict(slug=s.replace(f"{ASSET}-updown-{os.getenv('PERIOD', '300') and int(os.getenv('PERIOD', '300')) // 60}m-", ""), time=rs[0]["start_utc"][11:16], winner=rs[0]["winner"],
                         rules=[dict(name=r["variant"], decision=r["decision"], reason=r["reason"], ask=f(r["ask"]), secs=f(r["secs_left"]),
                                     dl=f(r["dl"]), thr=f(r["threshold"]), lead_min=f(r["lead_min"]), lead_max=f(r["lead_max"]),
                                     live=r["live_status"], won=f(r["won"]), pnl=f(r["pnl"])) for r in rs]))
@@ -152,12 +152,12 @@ def build():
     curve, vanish = book_curve(brows)
     now = time.time(); day = now - 86400
     ent = [r for r in rows if r.get("entered") == "1"]
-    recent = [dict(slug=r["slug"].replace(f"{ASSET}-updown-5m-", ""), time=r["start_utc"][:16].replace("T", " "), side=r["side"], ask=f(r["ask"]),
+    recent = [dict(slug=r["slug"].replace(f"{ASSET}-updown-{os.getenv('PERIOD', '300') and int(os.getenv('PERIOD', '300')) // 60}m-", ""), time=r["start_utc"][:16].replace("T", " "), side=r["side"], ask=f(r["ask"]),
                    secs_left=f(r["secs_left"]), depth_usd=f(r["ask_usd_le_max"]), winner=r["winner"], won=f(r["won"]), pnl=f(r["pnl"]))
               for r in ent[-10:]][::-1]
     vnames = sorted({r["variant"] for r in vrows}, key=lambda s: (s[1:3], s))
     variants = [dict(name=v, **stats([r for r in vrows if r["variant"] == v])) for v in vnames]
-    losses = [dict(slug=r["slug"].replace(f"{ASSET}-updown-5m-", "") + " " + r["variant"], time=r["start_utc"][:16].replace("T", " "), side=r["side"], ask=f(r["ask"]),
+    losses = [dict(slug=r["slug"].replace(f"{ASSET}-updown-{os.getenv('PERIOD', '300') and int(os.getenv('PERIOD', '300')) // 60}m-", "") + " " + r["variant"], time=r["start_utc"][:16].replace("T", " "), side=r["side"], ask=f(r["ask"]),
                    secs_left=f(r["secs_left"]), dist_at_entry=f(r.get("dist_at_entry")), min_abs_dist=f(r.get("min_abs_dist")), pnl=f(r["pnl"]))
               for r in vrows if r.get("won") == "0"][-20:][::-1]
     per_market = {}

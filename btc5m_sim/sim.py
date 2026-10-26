@@ -29,7 +29,10 @@ ASSETS = {  # coinbase product, kraken pair + result key, Chainlink aggregator o
     "xrp": dict(cb="XRP-USD", kr=("XRPUSD", "XXRPZUSD"), feed="0x785ba89291f676b5386652eB12b30cF361020694", ref=1.34),
 }
 A = ASSETS.get(ASSET, ASSETS["btc"])
-GAMMA = "https://gamma-api.polymarket.com/events?slug=" + ASSET + "-updown-5m-{}"
+# Market length (fish 2026-10-26: also collect the 15-minute markets). PERIOD=900 -> slug "<asset>-updown-15m-<start>".
+PERIOD = int(os.getenv("PERIOD", "300"))
+SLUG_LABEL = f"{PERIOD // 60}m"
+GAMMA = "https://gamma-api.polymarket.com/events?slug=" + ASSET + "-updown-" + SLUG_LABEL + "-{}"
 BOOK = "https://clob.polymarket.com/book?token_id={}"
 SPOT_URLS = [("coinbase", f"https://api.exchange.coinbase.com/products/{A['cb']}/ticker"),   # real-time best bid/ask
              ("kraken", f"https://api.kraken.com/0/public/Ticker?pair={A['kr'][0]}")]
@@ -407,8 +410,8 @@ def decision_row(v, row):
 
 # ---------------- one market ----------------
 def watch(start, rows, vrows, lock):
-    end = start + 300
-    base = dict(slug=f"{ASSET}-updown-5m-{start}", start_utc=datetime.fromtimestamp(start, timezone.utc).isoformat())
+    end = start + PERIOD
+    base = dict(slug=f"{ASSET}-updown-{SLUG_LABEL}-{start}", start_utc=datetime.fromtimestamp(start, timezone.utc).isoformat())
     row = dict(base, entered=0, note="")
     vstate = {n: dict(base, variant=n, window=w, min_price=p, entered=0, note="", _filt=fl, _max=hi) for n, w, p, hi, fl in VARIANTS}
     samples = []
@@ -666,14 +669,14 @@ def main():
             log(f"ws spot feed unavailable ({type(e).__name__}); REST only"); _spot_feed = None
     log(f"start [{ASSET.upper()}]: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s; dist scale {DIST_SCALE:.4g}; "
         f"variants {[n for n, _, _, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")
-    tg((f"🔴 {ASSET.upper()} 5m bot 啟動：真單模式（會真的下單）" if exec_mode == "live" else f"🟢 {ASSET.upper()} 5m 模擬 bot 啟動（{'dry：算好單但不送' if exec_mode == 'dry' else '不下單'}）")
+    tg((f"🔴 {ASSET.upper()} {SLUG_LABEL} bot 啟動：真單模式（會真的下單）" if exec_mode == "live" else f"🟢 {ASSET.upper()} {SLUG_LABEL} 模擬 bot 啟動（{'dry：算好單但不送' if exec_mode == 'dry' else '不下單'}）")
        + f"\n規則：最後 {ENTRY_WINDOW} 秒，領先方賣價 {MIN_PRICE}~{MAX_PRICE} 就買 {SHARES:g} 股\n"
        f"影子變體：{', '.join(n for n, _, _, _, _ in VARIANTS)}\n下單模式：{exec_mode}" + ("（真單！）" if exec_mode == "live" else "（不送單）"))
     last_hour = int(time.time() // 3600); last_day = datetime.now(TZ).date(); day_start = time.time()
     while True:
         now = time.time()
-        start = int(now // 300) * 300
-        if start not in seen and now < start + 300 - ENTRY_WINDOW - 5:
+        start = int(now // PERIOD) * PERIOD
+        if start not in seen and now < start + PERIOD - ENTRY_WINDOW - 5:
             seen.add(start)
             threading.Thread(target=watch, args=(start, rows, vrows, lock), daemon=True).start()
         h = int(now // 3600)
