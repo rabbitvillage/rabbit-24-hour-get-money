@@ -54,6 +54,24 @@ def us_session_open(now=None):
     return US_SESSION_START <= hm < US_EARLY_CLOSE.get(d, US_SESSION_END)
 
 
+def review_block(variant, now=None):
+    """Blocks set by review.py (2026-10-26 self-review), read on every order; missing files = no effect.
+    DATA/PAUSE_UNTIL holds an epoch second: no real orders on this coin until then. DATA/DISABLED_RULES lists one rule per
+    line: those rules send no real orders (shadow keeps recording). The review only adds blocks; a human removes them."""
+    try:
+        p = os.path.join(DATA, "PAUSE_UNTIL")
+        if os.path.exists(p):
+            until = float(open(p).read().strip() or 0)
+            if (now or time.time()) < until:
+                return f"paused by review until {datetime.fromtimestamp(until, TZ).strftime('%m-%d %H:%M')}"
+        p = os.path.join(DATA, "DISABLED_RULES")
+        if os.path.exists(p) and variant in {l.strip() for l in open(p) if l.strip()}:
+            return "rule disabled by review"
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def us_session_close_local(now=None):
     """Today's session close as Taiwan clock time, for messages (e.g. '04:00')."""
     from zoneinfo import ZoneInfo
@@ -282,6 +300,8 @@ def guard(variant, slug, price, size, mode=None, outcome=None):
     if mode not in ("dry", "live"): return False, "mode off"
     if os.path.exists(KILL_FILE): return False, "kill file"
     if PAUSE_US_SESSION and us_session_open(): return False, "US stock session pause"
+    rb = review_block(variant)
+    if rb: return False, rb
     if LIVE_VARIANTS and variant not in LIVE_VARIANTS: return False, "rule not enabled"
     if not slug.startswith(SLUG_PREFIX): return False, "not a btc 5m market"
     if not (PRICE_MIN <= price <= PRICE_MAX): return False, f"price {price} out of range"

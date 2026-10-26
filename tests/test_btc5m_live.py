@@ -388,3 +388,19 @@ class UsSessionPause(unittest.TestCase):
         finally:
             live.PAUSE_US_SESSION, live.us_session_open = saved; d.cleanup()
 
+
+class ReviewBlocks(unittest.TestCase):
+    """DISABLED_RULES / PAUSE_UNTIL written by the self-review stop real orders without a restart."""
+    def setUp(self):
+        live._orders.clear(); live._daily.clear()
+        self.d = tempfile.TemporaryDirectory(); live.DATA = self.d.name; live.KILL_FILE = os.path.join(self.d.name, "STOP")
+    def tearDown(self): self.d.cleanup()
+    def test_disabled_rule_and_pause(self):
+        open(os.path.join(self.d.name, "DISABLED_RULES"), "w").write("w90_m99_s30\n")
+        self.assertEqual(live.guard("w90_m99_s30", "btc-updown-5m-1", 0.9, 5, mode="dry"), (False, "rule disabled by review"))
+        self.assertTrue(live.guard("w60_m95_s20", "btc-updown-5m-1", 0.9, 5, mode="dry")[0])
+        open(os.path.join(self.d.name, "PAUSE_UNTIL"), "w").write(str(int(live.time.time()) + 600))
+        ok, why = live.guard("w60_m95_s20", "btc-updown-5m-1", 0.9, 5, mode="dry"); self.assertFalse(ok); self.assertIn("paused by review", why)
+        open(os.path.join(self.d.name, "PAUSE_UNTIL"), "w").write(str(int(live.time.time()) - 10))
+        self.assertTrue(live.guard("w60_m95_s20", "btc-updown-5m-2", 0.9, 5, mode="dry")[0])
+

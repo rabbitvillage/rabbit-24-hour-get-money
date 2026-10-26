@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the 5m bot self-review every hour at :07
+
+[Timer]
+OnCalendar=*-*-* *:07:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
