@@ -23,6 +23,8 @@ VOL_X = float(os.getenv("REVIEW_VOL_X", "1.8"))            # price swings this m
 PAUSE_H = float(os.getenv("REVIEW_PAUSE_H", "2"))
 STALE_MIN = float(os.getenv("REVIEW_STALE_MIN", "30"))
 DAILY_HOUR = int(os.getenv("REVIEW_DAILY_HOUR", "9"))
+# Only judge trades after this moment (ISO time, e.g. a fresh start after a settings change); empty = no limit.
+SINCE = os.getenv("REVIEW_SINCE", "").strip()
 HARD_ERRORS = ("restricted", "signer", "unauthorized", "invalid", "forbidden")
 LFIELDS = ["ts", "coin", "decision", "reason", "action", "window_n", "window_losses", "window_pnl", "expected_loss_rate", "tail"]
 
@@ -115,6 +117,8 @@ def review_coin(coin, d, unit, now, act=True):
         out.update(decision="stopped", reason="已有停單檔（人工或先前緊急停機），不檢討"); return out
     orders, res = load(d)
     w0, b0 = now - timedelta(hours=WINDOW_H), now - timedelta(hours=WINDOW_H + BASE_H)
+    if SINCE:
+        w0 = max(w0, datetime.fromisoformat(SINCE).astimezone(TZ))
     win = [r for r in res if w0 < r["t"] <= now]; base = [r for r in res if b0 < r["t"] <= w0]
     n, l = len(win), sum(1 for r in win if not r["won"])
     out.update(window_n=n, window_losses=l, window_pnl=round(sum(r["pnl"] for r in win), 2))
