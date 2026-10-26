@@ -29,6 +29,7 @@ class Review(unittest.TestCase):
 
     def test_low_wallet_asks_for_funds_using_the_wallet_now(self):
         ledger(self.d, base(2))
+        old = review.FLOOR; review.FLOOR = 15.0; self.addCleanup(setattr, review, "FLOOR", old)   # production floor since 10-26
         review.wallet_free = lambda: 9.0
         o = self.run_once(); self.assertEqual(o["decision"], "fix"); self.assertIn("補資金", o["action"])
         review.wallet_free = lambda: 34.0                                   # above the floor again -> no false alarm
