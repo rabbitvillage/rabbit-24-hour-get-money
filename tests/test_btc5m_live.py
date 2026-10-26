@@ -418,3 +418,31 @@ class LowBalanceWarning(unittest.TestCase):
         live._warn_low(15.0); self.assertEqual(len(self.notes), 1); self.assertIn("19.50", self.notes[0])
         live._warn_low(12.0); self.assertEqual(len(self.notes), 1)                   # once a day
 
+
+class LossCooldown(unittest.TestCase):
+    """After a loss of the emulated live set (shadow too) no real orders for N markets; further losses extend it, told once."""
+    def setUp(self):
+        live._orders.clear(); live._daily.clear()
+        self.d = tempfile.TemporaryDirectory(); live.DATA = self.d.name; live.KILL_FILE = os.path.join(self.d.name, "STOP")
+        self.notes = []; live._notify = self.notes.append; live._log = lambda *a: None
+        self.old = (live.COOLDOWN_MARKETS, live.MAX_ORDERS_PER_MARKET); live.COOLDOWN_MARKETS, live.MAX_ORDERS_PER_MARKET = 12, 2
+    def tearDown(self):
+        live.COOLDOWN_MARKETS, live.MAX_ORDERS_PER_MARKET = self.old; self.d.cleanup()
+    def test_win_does_nothing_loss_pauses_and_extends(self):
+        now = live.time.time()
+        self.assertFalse(live.note_market("btc-updown-5m-1", [(90, "Up", 1), (60, "Up", 1)], now=now))
+        self.assertTrue(live.guard("w60_m95_s20", "btc-updown-5m-2", 0.9, 5, mode="dry")[0])
+        self.assertTrue(live.note_market("btc-updown-5m-2", [(90, "Down", 0)], now=now))
+        self.assertAlmostEqual(live.cooldown_until(), now + 3600, delta=2)
+        ok, why = live.guard("w60_m95_s20", "btc-updown-5m-3", 0.9, 5, mode="dry"); self.assertFalse(ok); self.assertIn("cooldown", why)
+        live.note_market("btc-updown-5m-3", [(60, "Up", 0)], now=now + 600)              # still losing -> extended, no 2nd message
+        self.assertAlmostEqual(live.cooldown_until(), now + 600 + 3600, delta=2); self.assertEqual(len(self.notes), 1)
+    def test_emulates_one_direction_and_the_cap(self):
+        # earliest Up wins; a later opposite Down loss would have been blocked by the direction lock -> no cool-down
+        self.assertFalse(live.note_market("btc-updown-5m-9", [(90, "Up", 1), (45, "Down", 0)]))
+        # third entry beyond the 2-per-market cap would not have been taken
+        self.assertFalse(live.note_market("btc-updown-5m-8", [(90, "Up", 1), (60, "Up", 1), (45, "Up", 0)]))
+    def test_off_by_default(self):
+        live.COOLDOWN_MARKETS = 0
+        self.assertFalse(live.note_market("btc-updown-5m-7", [(90, "Up", 0)]))
+

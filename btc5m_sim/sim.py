@@ -530,6 +530,9 @@ def watch(start, rows, vrows, lock):
                     for v in vstate.values():
                         v["price_to_beat"] = ptb; score(v, win)
                     live.settle(row["slug"], win)
+                    live_set_r = live.LIVE_VARIANTS or {n for n, *_ in VARIANTS}
+                    live.note_market(row["slug"], [(v.get("secs_left"), v.get("side"), v.get("won")) for n, v in vstate.items()
+                                                   if v.get("entered") and n in live_set_r])
                     feed.resolved(row["slug"], win, summary_lines())
                     break
             except Exception:

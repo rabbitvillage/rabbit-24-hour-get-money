@@ -54,6 +54,45 @@ def us_session_open(now=None):
     return US_SESSION_START <= hm < US_EARLY_CLOSE.get(d, US_SESSION_END)
 
 
+# Loss cool-down = reversal-regime detector (fish 2026-10-26: "我們需要偵測這種行情…最大殺傷對手"). Losses come in clusters
+# (10-24: 14 replayed losses in one day). Backtest on 8 days of BTC (1,960 markets, current rules, 15 sh): pausing real
+# orders for 12 markets after any loss of the live rule set (real or shadow) -> 853 trades / 26 losses / +$292 vs no
+# detection 1,050 / 39 / +$273; worst day -$89 -> -$15 (10-24 itself -$5). SOL rarely loses (4 in 1,083): 6 markets.
+# Shadow losses count too, so the pause keeps extending while the bad regime lasts even though no real order goes out.
+COOLDOWN_MARKETS = int(os.getenv("LIVE_LOSS_COOLDOWN_MARKETS", "0"))
+
+
+def cooldown_until():
+    try:
+        return float(open(os.path.join(DATA, "COOLDOWN_UNTIL")).read().strip() or 0)
+    except (OSError, ValueError):
+        return 0.0
+
+
+def note_market(slug, entries, now=None):
+    """Called by the simulator once a market resolved. entries: (secs_left, side, won) of every live-listed rule that entered
+    (shadow included). The live set is emulated (earliest first, one direction, at most MAX_ORDERS_PER_MARKET); any loss in it
+    starts or extends the cool-down. Returns True when a loss was seen."""
+    if not COOLDOWN_MARKETS:
+        return False
+    taken, held = [], None
+    for secs, side, won in sorted(entries, key=lambda e: -float(e[0] or 0)):
+        if held and side != held: continue
+        if MAX_ORDERS_PER_MARKET and len(taken) >= MAX_ORDERS_PER_MARKET: break
+        held = held or side; taken.append(won)
+    if not any(w in (0, "0", False) for w in taken):
+        return False
+    now = now or time.time(); old = cooldown_until(); until = max(old, now + COOLDOWN_MARKETS * 300)
+    try:
+        open(os.path.join(DATA, "COOLDOWN_UNTIL"), "w").write(str(int(until)))
+    except OSError:
+        pass
+    if old <= now:                                                   # a new cool-down, not an extension: tell once
+        msg = f"⏸ [{ASSET.upper()}] 剛出現輸單（{slug[-10:]}），進入冷卻：{COOLDOWN_MARKETS * 5} 分鐘內不下真單，到 {datetime.fromtimestamp(until, TZ).strftime('%H:%M')}；期間影子再輸會自動延長"
+        _log("live: " + msg); _notify(msg)
+    return True
+
+
 def review_block(variant, now=None):
     """Blocks set by review.py (2026-10-26 self-review), read on every order; missing files = no effect.
     DATA/PAUSE_UNTIL holds an epoch second: no real orders on this coin until then. DATA/DISABLED_RULES lists one rule per
@@ -161,7 +200,7 @@ def init(notify=None, log=None):
         threading.Thread(target=_balance_loop, daemon=True).start()
     if MODE == "live" and PAUSE_US_SESSION:
         threading.Thread(target=_session_loop, daemon=True).start()
-    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} max/market={MAX_ORDERS_PER_MARKET} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} warn ${MIN_BALANCE_WARN:g} kill={KILL_FILE}"
+    _log(f"live: mode={MODE} shares={LIVE_SHARES:g} max/market={MAX_ORDERS_PER_MARKET} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} warn ${MIN_BALANCE_WARN:g} cooldown {COOLDOWN_MARKETS} mkts kill={KILL_FILE}"
          + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all")
          + (f" us_pause=on ({US_SESSION_START}-{US_SESSION_END} {US_TZ} Mon-Fri, now {'OPEN -> paused' if us_session_open() else 'closed'})" if PAUSE_US_SESSION else " us_pause=off"))
     if MODE == "live" and not (SIGNER_URL and SIGNER_TOKEN and SIGNER_ADDRESS and API_KEY and API_SECRET and API_PASSPHRASE):
@@ -323,6 +362,8 @@ def guard(variant, slug, price, size, mode=None, outcome=None):
     if PAUSE_US_SESSION and us_session_open(): return False, "US stock session pause"
     rb = review_block(variant)
     if rb: return False, rb
+    cu = cooldown_until() if COOLDOWN_MARKETS else 0
+    if cu and time.time() < cu: return False, f"cooldown after loss until {datetime.fromtimestamp(cu, TZ).strftime('%m-%d %H:%M')}"
     if LIVE_VARIANTS and variant not in LIVE_VARIANTS: return False, "rule not enabled"
     if not slug.startswith(SLUG_PREFIX): return False, "not a btc 5m market"
     if not (PRICE_MIN <= price <= PRICE_MAX): return False, f"price {price} out of range"
