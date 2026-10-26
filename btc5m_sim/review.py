@@ -70,6 +70,33 @@ def swings(d, slugs):
     return statistics.median(xs) if xs else None
 
 
+FLOOR = float(os.getenv("MIN_BALANCE_USDC", "50"))
+
+
+def wallet_free():
+    """Free USDC right now (needs the CLOB credentials from .live.env); None when it cannot be read."""
+    try:
+        from btc5m_sim import live
+        return live.wallet_balance(force=True)
+    except Exception:
+        return None
+
+
+def equity(d, orders, res):
+    """(free USDC, money in filled orders not yet settled) — judged on the wallet as it is now, not on old skip lines."""
+    free = wallet_free()
+    if free is None:
+        return None
+    done = {(r["rule"], r["slug"]) for r in res}
+    settled = set()
+    p = os.path.join(d, "live_results.csv")
+    if os.path.exists(p):
+        settled = {(r["variant"], r["slug"]) for r in csv.DictReader(open(p))}
+    pending = sum(float(o.get("cost") or 0) for o in orders if o.get("mode") == "live" and o.get("status") == "filled"
+                  and (o["variant"], o["slug"]) not in settled and (o["variant"], o["slug"]) not in done)
+    return free, pending
+
+
 def review_coin(coin, d, unit, now, act=True):
     out = dict(coin=coin, decision="continue", reason="", action="", window_n=0, window_losses=0, window_pnl=0.0, expected_loss_rate="", tail="")
     def do(kind, what):
@@ -98,8 +125,10 @@ def review_coin(coin, d, unit, now, act=True):
     if os.path.exists(book) and time.time() - os.path.getmtime(book) > STALE_MIN * 60:
         out.update(decision="fix", reason=f"盤口資料超過 {STALE_MIN:g} 分鐘沒更新"); do("restart", f"重啟 {unit}"); return out
     recent = [o for o in orders if o.get("ts") and _ts(o["ts"]) > now - timedelta(hours=2)]
-    if any(o.get("status") == "skipped" and o.get("msg", "").startswith("wallet $") for o in recent):
-        out.update(decision="fix", reason="錢包低於下限，機器人停買中", action="需要你補資金（程式無法代勞）"); return out
+    eq = equity(d, orders, res)
+    if eq is not None and eq[0] + eq[1] < FLOOR:
+        out.update(decision="fix", reason=f"錢包可用 ${eq[0]:.2f}＋未結算 ${eq[1]:.2f}，低於停買下限 ${FLOOR:g}，機器人停買中",
+                   action="需要你補資金（程式無法代勞）"); return out
     hard = [o for o in recent if o.get("status") in ("rejected", "error") and any(h in o.get("msg", "").lower() for h in HARD_ERRORS)]
     if len(hard) >= 3:
         out.update(decision="fix", reason=f"下單被拒 {len(hard)} 次（地區封鎖或簽名問題）"); do("pause", f"暫停 {PAUSE_H:g} 小時，請檢查代理與簽名")

@@ -23,8 +23,16 @@ def base(losses=2, n=60):
 
 
 class Review(unittest.TestCase):
-    def setUp(self): self.t = tempfile.TemporaryDirectory(); self.d = self.t.name
-    def tearDown(self): self.t.cleanup()
+    def setUp(self):
+        self.t = tempfile.TemporaryDirectory(); self.d = self.t.name; self.saved = review.wallet_free; review.wallet_free = lambda: 100.0
+    def tearDown(self): self.t.cleanup(); review.wallet_free = self.saved
+
+    def test_low_wallet_asks_for_funds_using_the_wallet_now(self):
+        ledger(self.d, base(2))
+        review.wallet_free = lambda: 9.0
+        o = self.run_once(); self.assertEqual(o["decision"], "fix"); self.assertIn("補資金", o["action"])
+        review.wallet_free = lambda: 34.0                                   # above the floor again -> no false alarm
+        self.assertNotEqual(self.run_once()["reason"].startswith("錢包"), True)
     def run_once(self, act=True): return review.review_coin("BTC", self.d, None, datetime.now(review.TZ), act=act)
 
     def test_binom_tail(self):
