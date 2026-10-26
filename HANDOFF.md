@@ -13,3 +13,5 @@
 - 分析腳本在 `Docs/custom-queries/`（README 有用法與解讀）：手續費／手操對帳、某日手操逐場＋行情、0.98 翻船率、專吃 0.97/0.98 的期望值、真單按價位、成交滑價。都唯讀，scp 到主機跑。
 - 尾盤 0.98 結論（10-26）：扣費後每 $1 剩 0～0.3 分，看板主規則影子 592 筆 +$4.44 ≈ 0。BTC 0.97 最後 45 秒每股約 +1 分、一天約 38 次，但翻船只有 6 次樣本；sim_book 再累積一個月後重跑 tail98.py 再議。
 - 手操對帳（鏈上）：10-24 手操 58 場、周轉 $1,651、手續費 $33、−$114.67；19:04 前 34 場 +$76（勝率 74%、每場 $21），之後 24 場 −$191（勝率 46%、每場 $39、42% 同場兩邊都買）；兩段的行情統計相同。全部手操 181 場 −$208。
+- 21:35 補：新增 IO『獨立作業』影子監測（fish：最後 60 秒出現 0.97 就買，只看勝率、不算滑價）。獨立程序 `btc5m_sim/io_monitor.py`＋`btc5m-io.timer`（每 5 分鐘），不下單、不碰真單程式與 .env；報表 `btc5m_sim/io/<asset>/io_report.txt` 或 `python3 -m btc5m_sim.io_monitor --report`。主機 timer 已啟用，帳本從 10-26 21:34 起算，10-27 晚上看一天結論。9 天歷史試跑：BTC 翻船 2.25%（損益兩平 2.80%）、ETH 3.60%、SOL 3.03%。停掉：`systemctl disable --now btc5m-io.timer`。FR：Docs/FR/FR-20261026-io-monitor.md。
+- 主機 repo 狀態：/opt 的 checkout 停在 c5e69c8；review.py 的 REVIEW_SINCE、io_monitor.py、兩個 io unit 檔都是直接放上主機（未 commit，內容和本機 commit 相同）。下次在主機 `git pull` 前先 `git checkout btc5m_sim/review.py` 並比對那三個檔，否則會被擋。
