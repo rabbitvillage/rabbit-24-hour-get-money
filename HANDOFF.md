@@ -17,4 +17,4 @@
 - 10-27 11:35 狀態：真單 BTC 17:45 起 7 筆全贏（帳本 +$4.82，扣費約 +$4.5），送單 13 筆有 6 筆沒吃到；SOL 0 筆；無 STOP；IO 監測 14 小時三幣合計 164 場翻船 5（3.05%，非美股 1/89、美股 4/75）。
 - 後續清單（驗收期內不做）：`Docs/operations/todo.md` — fish 10-27 要的「加安全、不損利」候選，已分成不損利／可能加利／會少做／不建議四組。fish 10-27 裁示：效能與延遲優先做，策略不動。
 - 10-27 延遲工作（FR-20261027-signer-keepalive）：簽名 Worker 改暖連線＋啟動時預取身分，預期每筆省約 100 ms；Worker 內部簽名多花 400～1,000 ms（whoami 0.1～0.2 s、dry 驗證 0.2 s、真簽名 0.5～1.3 s），原始碼在 fish 的 rcss-sniper repo，不在主機，要改得 fish 來。ws 盤口與 REST 比對（Docs/custom-queries/ws_vs_rest.py）最後 90 秒最佳賣價一致 → 「找不到對手單」是價格在 1～1.3 秒內跑掉，不是盤口舊。
-- 主機 repo 狀態：/opt 的 checkout 停在 c5e69c8；review.py 的 REVIEW_SINCE、io_monitor.py、兩個 io unit 檔都是直接放上主機（未 commit，內容和本機 commit 相同）。下次在主機 `git pull` 前先 `git checkout btc5m_sim/review.py` 並比對那三個檔，否則會被擋。
+- 10-27 13:01 部署：主機 repo 已對齊 GitHub（分支 btc5m-sim/shadow-variants，3dce6d7），四個 sim 服務在安全時刻重啟、全部 active，簽名 Worker 暖連線上線。之後部署一律：本機 commit → push → 主機 `bash btc5m_sim/update_and_restart.sh`（會自己等到收盤後 5～140 秒才重啟）。驗證方式：下一筆真單在 journal 的 `live timing ... sign` 應比之前的 550～740 ms 少約 100 ms。
