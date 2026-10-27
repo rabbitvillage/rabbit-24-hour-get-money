@@ -278,3 +278,36 @@ class PeriodParam(unittest.TestCase):
             os.environ.pop("PERIOD", None); importlib.reload(sim)
         self.assertEqual(sim.SLUG_LABEL, "5m")
 
+
+
+class ProvisionalWinner(unittest.TestCase):
+    """The closing book names the loser (ask <= 0.05) seconds after the close; gamma takes a median 5 minutes."""
+    class FakeBook:
+        def __init__(self, books): self.books = books
+        def book_now(self, tok, now=None): return self.books.get(str(tok)), 0.1
+    def test_loser_at_the_floor_names_the_winner(self):
+        bf = self.FakeBook({"111": {"asks": [], "bids": []}, "222": {"asks": [{"price": "0.01", "size": "40000"}], "bids": []}})
+        self.assertEqual(sim.provisional_winner(bf, ["111", "222"], ["Up", "Down"]), "Up")        # 10-27 18:35: Up had no asks left, Down at 0.01
+        bf = self.FakeBook({"111": {"asks": [{"price": "0.02", "size": "5"}], "bids": []}, "222": {"asks": [{"price": "0.99", "size": "5"}], "bids": []}})
+        self.assertEqual(sim.provisional_winner(bf, ["111", "222"], ["Up", "Down"]), "Down")
+    def test_unclear_book_gives_none(self):
+        bf = self.FakeBook({"111": {"asks": [{"price": "0.55", "size": "5"}], "bids": []}, "222": {"asks": [{"price": "0.47", "size": "5"}], "bids": []}})
+        self.assertIsNone(sim.provisional_winner(bf, ["111", "222"], ["Up", "Down"]))
+        self.assertIsNone(sim.provisional_winner(self.FakeBook({}), ["111", "222"], ["Up", "Down"]))
+        bf = self.FakeBook({"111": {"asks": [{"price": "0.01", "size": "5"}], "bids": []}, "222": {"asks": [{"price": "0.03", "size": "5"}], "bids": []}})
+        self.assertIsNone(sim.provisional_winner(bf, ["111", "222"], ["Up", "Down"]))              # both at the floor: nonsense, say nothing
+
+
+class GapFilter(unittest.TestCase):
+    def test_gap_block(self):
+        old = sim.BOOK_GAP_MAX; sim.BOOK_GAP_MAX = 0.05
+        try:
+            asks = [(0.27, 100.0, 27.0), (0.84, 5053.0, 4244.0)]                   # 10-27 18:34: Up 0.27 + Down 0.84 = 1.11
+            b = sim.gap_block((1, 0.84, 5053.0, 4244.0), asks, 36.6)
+            self.assertEqual((b["reason"], b["dl"], b["thr"]), ("gap", 0.11, 0.05))
+            self.assertIsNone(sim.gap_block((1, 0.84, 5.0, 4.2), [(0.17, 1.0, 0.17), (0.84, 5.0, 4.2)], 30))   # 1.01: a normal book
+            self.assertIsNone(sim.gap_block((1, 0.84, 5.0, 4.2), [(None, 0.0, 0.0), (0.84, 5.0, 4.2)], 30))   # other side empty: nothing to compare
+            self.assertIsNone(sim.gap_block(None, asks, 30))
+            sim.BOOK_GAP_MAX = 0
+            self.assertIsNone(sim.gap_block((1, 0.84, 5053.0, 4244.0), asks, 36.6))                           # off by default
+        finally: sim.BOOK_GAP_MAX = old

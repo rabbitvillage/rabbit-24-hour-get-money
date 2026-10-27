@@ -46,6 +46,12 @@ class Guards(unittest.TestCase):
         self.assertEqual(live.guard("main", "btc-updown-5m-1", 0.98, 5)[1], "already ordered this market")
         self.assertTrue(live.guard("w20_p98", "btc-updown-5m-1", 0.98, 5)[0])
 
+    def test_executor_ask_floor(self):
+        """The executor refuses what the rules decided below 0.80, whatever sim.py's own floor says (10-21: a live loss at 0.55)."""
+        self.assertIn("executor floor 0.8", live.guard("w60_m95_s20", "btc-updown-5m-1", 0.81, 5, ask=0.79)[1])
+        self.assertTrue(live.guard("w60_m95_s20", "btc-updown-5m-1", 0.82, 5, ask=0.80)[0])
+        self.assertTrue(live.guard("w60_m95_s20", "btc-updown-5m-1", 0.82, 5)[0])              # callers without an ask: unchanged
+
 
 class BalanceFloor(unittest.TestCase):
     def setUp(self):
@@ -115,6 +121,11 @@ class DryAndSettle(unittest.TestCase):
         row = live._submit("w60_m95_s20", market("btc-updown-5m-3"), 1, 0.82, 36.6, mode="dry", book_fn=lambda: 0.79)   # a 3-cent dip, but under the 0.80 floor
         self.assertEqual(row["status"], "aborted"); self.assertIn("under floor 0.8", row["msg"])
         self.assertEqual([r["status"] for r in self.rows("live_orders.csv")], ["aborted", "dry", "aborted"])
+
+    def test_submit_skips_an_ask_under_the_executor_floor(self):
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-7"), 1, 0.70, 36.6, mode="dry")
+        self.assertEqual(row["status"], "skipped"); self.assertIn("executor floor", row["msg"])
+        self.assertEqual(self.rows("live_orders.csv")[-1]["status"], "skipped")
 
     def test_settle_books_pnl_and_trips_stops(self):
         live._submit("w60_m95_s10", market(), 0, 0.80, 55.0, mode="dry")
@@ -269,6 +280,20 @@ class Recovery(unittest.TestCase):
             self.assertEqual(live._orders[("w45_p98", "btc-updown-5m-1792593000")]["filled_size"], 5.15625)
             self.assertEqual(started, [("btc-updown-5m-1792593000",)])
             live._orders.clear()
+
+    def test_a_loss_settled_after_a_restart_starts_the_cooldown(self):
+        live._orders.clear(); live._daily.clear()
+        with tempfile.TemporaryDirectory() as d:
+            live.DATA = d; live._log = lambda *a: None; notes = []; live._notify = notes.append
+            saved = (live._get, live.COOLDOWN_MARKETS); live.COOLDOWN_MARKETS = 9
+            live._get = lambda url, **kw: [{"markets": [{"closed": True, "outcomePrices": '["1", "0"]', "outcomes": '["Up", "Down"]'}]}]
+            live._orders[("w60_m95_s20", "btc-updown-5m-1793097000")] = dict(status="filled", outcome="Down", filled_size=13.456141, size=8.9186, cost=7.67, price=0.86, secs_left="36.6")
+            try: live._settle_when_resolved("btc-updown-5m-1793097000")
+            finally: live._get, live.COOLDOWN_MARKETS = saved
+            r = list(csv.DictReader(open(os.path.join(d, "live_results.csv"))))[-1]
+            self.assertEqual((r["won"], r["winner"]), ("0", "Up")); self.assertAlmostEqual(float(r["pnl"]), -7.67, 3)
+            self.assertGreater(live.cooldown_until(), live.time.time() + 9 * 300 - 5); self.assertTrue(any("冷卻" in n for n in notes))
+            live._orders.clear(); live._daily.clear()
 
 
 class WireFormat(unittest.TestCase):
@@ -473,6 +498,13 @@ class LossCooldown(unittest.TestCase):
         ok, why = live.guard("w60_m95_s20", "btc-updown-5m-3", 0.9, 5, mode="dry"); self.assertFalse(ok); self.assertIn("cooldown", why)
         live.note_market("btc-updown-5m-3", [(60, "Up", 0)], now=now + 600)              # still losing -> extended, no 2nd message
         self.assertAlmostEqual(live.cooldown_until(), now + 600 + 3600, delta=2); self.assertEqual(len(self.notes), 1)
+    def test_provisional_loss_from_the_closing_book_starts_the_cooldown_once(self):
+        now = live.time.time()
+        self.assertTrue(live.note_market("btc-updown-5m-4", [(60, "Down", 0)], now=now, provisional=True))
+        self.assertIn("收盤盤口判定", self.notes[-1]); self.assertAlmostEqual(live.cooldown_until(), now + 3600, delta=2)
+        ok, why = live.guard("w60_m95_s20", "btc-updown-5m-5", 0.9, 5, mode="dry"); self.assertFalse(ok); self.assertIn("cooldown", why)
+        self.assertTrue(live.note_market("btc-updown-5m-4", [(60, "Down", 0)], now=now + 300))   # the real resolution 5 min later: extends, told once
+        self.assertEqual(len(self.notes), 1); self.assertAlmostEqual(live.cooldown_until(), now + 300 + 3600, delta=2)
     def test_emulates_one_direction_and_the_cap(self):
         # earliest Up wins; a later opposite Down loss would have been blocked by the direction lock -> no cool-down
         self.assertFalse(live.note_market("btc-updown-5m-9", [(90, "Up", 1), (45, "Down", 0)]))

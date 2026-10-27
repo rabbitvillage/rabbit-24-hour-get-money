@@ -91,6 +91,14 @@ data-api 每分鐘抓太多會回 429『請求太多』，腳本已經每頁停 
 - **怎麼看**：只有 gap 值得考慮（18 筆：4 輸 14 贏，被擋合計 −$7.3），其他都擋掉太多贏單。todo 第 13 項，11-02 再議。
 - **不能拿去下單的情況**：183 筆影子只有 11 筆輸單，任何一個過濾的證據都薄；這是候選清單，不是結論。
 
+## struct_ledger_checks.py / struct_chain_checks.py：結構檢查（10-27）
+
+- **用途**：`Docs/operations/structural-review-20261027.md` 的量化依據，可重跑。ledger 版（只讀帳本）：B 結算延遲與冷卻缺口（gamma 標記結算的秒數分布、每筆真單輸單被記帳前有沒有又送單）、E 最後 60 秒幣價不變的最長秒數、F 距離門檻兩個價來源的差與預測力、3 被拒訊息是否命中 review.py 的 HARD_ERRORS。chain 版（主機上用 data-api）：E2 決定時幣價幾秒沒變 vs 輸贏、F2 距離的方向 vs 幅度、A 贏家判定對照鏈上 REDEEM、N 帳本說被拒鏈上卻成交。
+- **參數**：無；`REPO` 環境變數預設 `/opt/rabbit-24-hour-get-money`；chain 版要先 `set -a; . btc5m_sim/.env; . btc5m_sim/.live.env; set +a`（拿代理錢包地址）。
+- **怎麼跑**：`python3 -I Docs/custom-queries/struct_ledger_checks.py`、`python3 -I Docs/custom-queries/struct_chain_checks.py`
+- **怎麼看**：10-27 結果——結算中位數晚 301 秒、28 筆輸單 9 筆在冷卻前又送單；幣價 ≥10 秒不變 27.5% 場次；開盤價來源 |差| p90 38 美元；距離幅度不分輸贏；661 筆贏家判定 8 筆可解釋的不符、0 筆幽靈成交。
+- **不能拿去下單的情況**：這是系統體檢，不是訊號。A/N 的「不符」要逐筆看是不是手操或同場另一邊造成的。
+
 ## ws_vs_rest.py：websocket 盤口和 REST 一不一樣
 
 - **用途**：自己開一條 BookFeed『盤口即時推送』，在每場最後 90 秒每秒拿 REST /book 來比：兩邊最佳賣價、ws 盤口幾秒沒更新、層數、0.97 以下的深度。看「找不到對手單」是不是盤口舊（phantom『ws 有、REST 沒有』）或成交比看到的便宜很多（missing『REST 有更便宜的、ws 不知道』）。不碰機器人。

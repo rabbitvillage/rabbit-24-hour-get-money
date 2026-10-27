@@ -116,10 +116,14 @@ def cooldown_until():
         return 0.0
 
 
-def note_market(slug, entries, now=None):
+def note_market(slug, entries, now=None, provisional=False):
     """Called by the simulator once a market resolved. entries: (secs_left, side, won) of every live-listed rule that entered
     (shadow included). The live set is emulated (earliest first, one direction, at most MAX_ORDERS_PER_MARKET); any loss in it
-    starts or extends the cool-down. Returns True when a loss was seen."""
+    starts or extends the cool-down. Returns True when a loss was seen.
+    provisional: the result was read off the closing order book (sim.provisional_winner) seconds after the close, because
+    gamma marks the market closed a median 5 minutes later — too late for the cool-down to cover the next market (2026-10-27
+    structural review: 9 of 28 real BTC losses had a real order out before the loss was booked). The real resolution calls
+    this again; a cool-down only ever extends, so a confirmed loss costs nothing extra."""
     if not COOLDOWN_MARKETS:
         return False
     taken, held = [], None
@@ -135,7 +139,8 @@ def note_market(slug, entries, now=None):
     except OSError:
         pass
     if old <= now:                                                   # a new cool-down, not an extension: tell once
-        msg = f"⏸ [{ASSET.upper()}] 剛出現輸單（{slug[-10:]}），進入冷卻：{COOLDOWN_MARKETS * 5} 分鐘內不下真單，到 {datetime.fromtimestamp(until, TZ).strftime('%H:%M')}；期間影子再輸會自動延長"
+        msg = (f"⏸ [{ASSET.upper()}] 剛出現輸單（{slug[-10:]}{'，收盤盤口判定' if provisional else ''}），進入冷卻：{COOLDOWN_MARKETS * 5} 分鐘內不下真單，"
+               f"到 {datetime.fromtimestamp(until, TZ).strftime('%H:%M')}；期間影子再輸會自動延長")
         _log("live: " + msg); _notify(msg)
     return True
 
@@ -173,6 +178,9 @@ SLIP = float(os.getenv("LIVE_SLIP", "0.01"))                 # pay up to ask + S
 # the rule decided on, or has risen above the limit, the order is not sent (status "aborted"). 0 = off.
 RECHECK_DROP = float(os.getenv("LIVE_RECHECK_DROP", "0.05"))
 RECHECK_FLOOR = float(os.getenv("LIVE_RECHECK_FLOOR", "0.80"))   # fish 10-27: 0.80-0.97 is acceptable, 0.5x is not -> never send under this
+# Executor's own floor on the ask a rule decided on (2026-10-27 structural review): the strategy floor lives in sim.py (M_FLOOR)
+# and the 10-21 loss at 0.55 happened when that floor was 0.50. Whatever the rules say, the executor refuses asks under this.
+ASK_FLOOR = float(os.getenv("LIVE_ASK_FLOOR", "0.80"))
 FEE_RATE = float(os.getenv("LIVE_FEE_RATE", "0.07"))         # Polymarket crypto taker fee rate: fee = rate x p x (1-p) x shares (USDC, on top)
 PRICE_MIN, PRICE_MAX = 0.5, 0.99
 MAX_DAILY_LOSS_VARIANT = float(os.getenv("MAX_DAILY_LOSS_VARIANT", "15"))
@@ -303,7 +311,11 @@ def _settle_when_resolved(slug):
                 m = ev[0]["markets"][0]
                 if m.get("closed"):
                     prices = json.loads(m["outcomePrices"]); outcomes = json.loads(m["outcomes"])
-                    settle(slug, outcomes[0] if float(prices[0]) > 0.5 else outcomes[1]); return
+                    winner = outcomes[0] if float(prices[0]) > 0.5 else outcomes[1]
+                    with _lock:                                   # the loss cool-down must follow a recovered loss too (2026-10-27)
+                        entries = [(float(r.get("secs_left") or 0), r["outcome"], int(r["outcome"] == winner))
+                                   for (v, s), r in _orders.items() if s == slug and r.get("status") == "filled"]
+                    settle(slug, winner); note_market(slug, entries); return
         except Exception as e:
             _log(f"live: recover {slug} poll error {type(e).__name__}")
         time.sleep(30)
@@ -434,7 +446,7 @@ def prefetch_tick(market):
     threading.Thread(target=_prefetch_tick_now, args=(market,), daemon=True).start()
 
 
-def guard(variant, slug, price, size, mode=None, outcome=None):
+def guard(variant, slug, price, size, mode=None, outcome=None, ask=None):
     """Return (ok, reason). Every reason is recorded in the ledger so skipped orders are visible.
     outcome: the side this order would buy. One market, one direction: once any rule holds Up here, no rule may buy
     Down (2026-10-22 15:48 BTC and ETH both bought Up at 120s then Down at 60s — paying $72 for a $60 max payout)."""
@@ -451,6 +463,7 @@ def guard(variant, slug, price, size, mode=None, outcome=None):
     if LIVE_VARIANTS and variant not in LIVE_VARIANTS: return False, "rule not enabled"
     if not slug.startswith(SLUG_PREFIX): return False, "not a btc 5m market"
     if not (PRICE_MIN <= price <= PRICE_MAX): return False, f"price {price} out of range"
+    if ask is not None and ask < ASK_FLOOR: return False, f"ask {ask} below executor floor {ASK_FLOOR:g}"
     if size <= 0 or size > MAX_SHARES: return False, f"size {size} out of range"
     if (variant, slug) in _orders: return False, "already ordered this market"
     same = [r for (v, s), r in _orders.items() if s == slug and r.get("status") in ("", "filled", "dry", "pending")]
@@ -758,7 +771,7 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, 
                ask=ask, price=price, size=size, tick=DEFAULT_TICK, neg_risk=market.get("negRisk", ""), order_type=ORDER_TYPE, status="", order_id="",
                filled_size=0, cost=0, secs_left=secs_left, msg="")
     with _lock:
-        ok, why = guard(variant, slug, price, size, mode, outcome)
+        ok, why = guard(variant, slug, price, size, mode, outcome, ask=ask)
         tm["guard"] = time.time()
         if not ok:
             row["status"] = "skipped"; row["msg"] = why; _append("live_orders.csv", OFIELDS, row); _last[(variant, slug)] = ("skipped", why)

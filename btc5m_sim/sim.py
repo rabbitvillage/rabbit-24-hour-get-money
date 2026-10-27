@@ -100,6 +100,17 @@ VARIANTS = [(n, w, lo, hi, None if f is None else round(f * DIST_SCALE, 4)) for 
 # of the line removed 11 of 22 losses and lifted net from +$65 to +$121 (15 sh); per day it cost $3-4 on calm days and saved $52 on
 # the choppy one. Measured only from data already seen in this market (no look-ahead). 0 = off.
 CHOP_MAX_AMP_BPS = float(os.getenv("CHOP_MAX_AMP_BPS", "8"))
+# Book-consistency filter (2026-10-27 18:34: the rule saw Down at 0.84 while Up's ask was 0.27 — the asks summed to 1.11, a
+# hole left by a sweep, not a price; one second later Down was back at 0.5). With the loop waking on every book update such
+# instants are always seen. BOOK_GAP_MAX: refuse an entry when favourite ask + other side's ask - 1 exceeds it. Shadow replay
+# (w60/w45_m95_s20, BTC since 10-21, non-US): > 0.05 in 18 of 183 entries, 4 losses / 14 wins, blocked pnl negative.
+# 0 = off (default while the acceptance week's rules are frozen; fish decides).
+BOOK_GAP_MAX = float(os.getenv("BOOK_GAP_MAX", "0"))
+# Provisional result from the closing book (2026-10-27 structural review): gamma marks a market closed a median 301 s after
+# the close (75% later than 240 s), so a loss cool-down started at resolution never covered the next market. PROVISIONAL_AFTER
+# seconds after the close the book is read once: a side whose best ask is <= PROV_LOSER_ASK has lost. Negative = off.
+PROVISIONAL_AFTER = float(os.getenv("PROVISIONAL_AFTER", "2"))
+PROV_LOSER_ASK = float(os.getenv("PROV_LOSER_ASK", "0.05"))
 
 
 def amp_bps(spot_min, spot_max, ref):
@@ -114,6 +125,33 @@ def chop_block(hit, amp, secs_left):
     if hit is None or not CHOP_MAX_AMP_BPS or amp is None or amp < CHOP_MAX_AMP_BPS:
         return None
     return dict(reason="chop", ask=hit[1], secs=secs_left, dl=round(amp, 1), thr=CHOP_MAX_AMP_BPS)
+
+
+def gap_block(hit, asks, secs_left):
+    """The _block record for a would-be entry refused because the two sides' asks do not add up (see BOOK_GAP_MAX), else None."""
+    if hit is None or not BOOK_GAP_MAX:
+        return None
+    other = asks[1 - hit[0]][0]
+    if other is None:
+        return None
+    gap = hit[1] + other - 1
+    if gap <= BOOK_GAP_MAX + 1e-9:
+        return None
+    return dict(reason="gap", ask=hit[1], secs=secs_left, dl=round(gap, 3), thr=BOOK_GAP_MAX)
+
+
+def provisional_winner(bf, tokens, outcomes, loser_ask=None):
+    """Winner read off the closing order book: the side whose best ask is <= PROV_LOSER_ASK is worthless, so the other side
+    won. None when the book does not say so clearly (both sides or neither at the floor, no book)."""
+    loser_ask = PROV_LOSER_ASK if loser_ask is None else loser_ask
+    dead = []
+    for tok in tokens:
+        b, _ = bf.book_now(tok)
+        best = best_ask(b, MAX_PRICE)[0] if b else None
+        dead.append(best is not None and best <= loser_ask)
+    if dead[0] != dead[1]:
+        return outcomes[1] if dead[0] else outcomes[0]
+    return None
 
 
 def dist_ok(side, dl, min_abs):
@@ -402,6 +440,8 @@ def rule_state(v, asks, lead, secs_left, dl_fn, outcomes, amp_fn=lambda: None):
         side_ok = (dl > 0) if side == "Up" else (dl < 0)
         if not side_ok: return f"賣價 {hit[1]:.3f} 可買 {side}，但幣價在對面（{dl:+.4g}），不買"
         if abs(dl) < v["_filt"]: return f"賣價 {hit[1]:.3f} 可買 {side}，但離線只有 {dl:+.4g}（門檻 {v['_filt']:.4g}），不買"
+    gb = gap_block(hit, asks, secs_left)
+    if gb: return f"賣價 {hit[1]:.3f} 可買 {outcomes[hit[0]]}，但兩邊賣價和 {1 + gb['dl']:.2f} 超過 1（盤口不一致），不買"
     amp = amp_fn()
     if chop_block(hit, amp, secs_left): return f"賣價 {hit[1]:.3f} 可買 {outcomes[hit[0]]}，但這場幣價來回振幅 {amp:.1f} bps ≥ {CHOP_MAX_AMP_BPS:g}（震盪盤），不買"
     return f"條件成立，準備買 {outcomes[hit[0]]} @{hit[1]:.3f}"
@@ -534,6 +574,9 @@ def watch(start, rows, vrows, lock):
                             v["_block"] = dict(reason="distance" if side_ok else ("no_spot" if dl is None else "direction"),
                                                ask=hit[1], secs=secs_left, dl=None if dl is None else round(dl, 2), thr=v["_filt"])
                             hit = None
+                    gb = gap_block(hit, asks, secs_left)
+                    if gb:
+                        v["_block"] = gb; hit = None
                     cb = chop_block(hit, amp_now, secs_left)
                     if cb:
                         v["_block"] = cb; hit = None
@@ -578,10 +621,21 @@ def watch(start, rows, vrows, lock):
                 else:
                     why = {"no_ask": "整個窗口領先方沒有賣單", "price_out_of_band": f"賣價 {d['lead_min']}–{d['lead_max']} 不在區間", "depth": "深度不夠",
                            "direction": f"幣價在對面（{d['dl']}）", "distance": f"離線只有 {d['dl']}，門檻 {d['threshold']}", "no_spot": "沒有現價",
-                           "chop": f"震盪盤，幣價來回振幅 {d['dl']} bps ≥ {d['threshold']:g}"}.get(d["reason"], d["reason"])
+                           "chop": f"震盪盤，幣價來回振幅 {d['dl']} bps ≥ {d['threshold']:g}",
+                           "gap": f"兩邊賣價和超過 1（差 {d['dl']}，門檻 {d['threshold']:g}），盤口不一致"}.get(d["reason"], d["reason"])
                     out.append(f"{n}：沒買，{why}")
             return out
         feed.finish(row["slug"], summary_lines())
+        # provisional result from the closing book, so a loss starts the cool-down now and not when gamma gets round to it
+        if bf is not None and PROVISIONAL_AFTER >= 0:
+            time.sleep(max(0, end + PROVISIONAL_AFTER - time.time()))
+            try:
+                prov = provisional_winner(bf, m["tokens"], m["outcomes"])
+                if prov and live.note_market(row["slug"], [(v.get("secs_left"), v.get("side"), int(v["side"] == prov))
+                                                          for n, v in vstate.items() if v.get("entered") and n in live_set], provisional=True):
+                    log(f"{row['slug']} closing book says {prov} won -> a live-listed entry lost, cool-down started before resolution")
+            except Exception as e:
+                log(f"{row['slug']} provisional result failed {type(e).__name__}")
         # wait for resolution
         time.sleep(max(0, end + 60 - time.time()))
         for _ in range(60):
