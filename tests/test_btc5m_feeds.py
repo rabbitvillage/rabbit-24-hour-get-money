@@ -34,3 +34,14 @@ class Book(unittest.TestCase):
         f.on_message(json.dumps({"event_type": "last_trade_price", "asset_id": "111", "price": "0.9"}), now=3.0)
         f.on_message("PONG", now=4.0)
         self.assertEqual(f.book_now("111", now=2.5), ({"asks": [{"price": "0.90", "size": 7.0}], "bids": []}, 0.5))
+
+    def test_changed_event_wakes_on_book_updates_only(self):
+        f = feeds.BookFeed(["111"])
+        self.assertFalse(f.changed.is_set())
+        f.on_message(json.dumps({"event_type": "book", "asset_id": "111", "bids": [], "asks": [{"price": "0.98", "size": "5"}]}), now=1.0)
+        self.assertTrue(f.changed.is_set()); f.changed.clear()
+        f.on_message(json.dumps({"event_type": "last_trade_price", "asset_id": "111", "price": "0.9"}), now=2.0)
+        f.on_message("PONG", now=2.5)
+        self.assertFalse(f.changed.is_set())                     # nothing changed in the book -> the loop keeps waiting
+        f.on_message(json.dumps({"event_type": "price_change", "asset_id": "111", "changes": [{"price": "0.97", "size": "3", "side": "SELL"}]}), now=3.0)
+        self.assertTrue(f.changed.wait(timeout=0.01))

@@ -18,4 +18,6 @@
 - 後續清單（驗收期內不做）：`Docs/operations/todo.md` — fish 10-27 要的「加安全、不損利」候選，已分成不損利／可能加利／會少做／不建議四組。fish 10-27 裁示：效能與延遲優先做，策略不動。
 - 10-27 延遲工作（FR-20261027-signer-keepalive）：簽名 Worker 改暖連線＋啟動時預取身分，預期每筆省約 100 ms；Worker 內部簽名多花 400～1,000 ms（whoami 0.1～0.2 s、dry 驗證 0.2 s、真簽名 0.5～1.3 s），原始碼在 fish 的 rcss-sniper repo，不在主機，要改得 fish 來。ws 盤口與 REST 比對（Docs/custom-queries/ws_vs_rest.py）最後 90 秒最佳賣價一致 → 「找不到對手單」是價格在 1～1.3 秒內跑掉，不是盤口舊。
 - 10-27 第二批（FR-20261027-exec-details）：決策輪詢預設 0.5→0.25 秒（盤口紀錄仍每 0.5 秒一列）、沒吃到後立刻抓交易所盤口寫 `live_miss.csv`、`live_results.csv` 的 fee 欄記真實手續費（pnl 仍毛利，停損不變）、review 摘要加淨值。量測後不改的：ws 盤口新鮮度判定（REST 退回只佔 4%）；時鐘 NTP 已同步。fish 13:52 手動部署（3997386，四服務 active）。主機 `btc5m_sim/.env` 的 `POLL` 原本 0.5 蓋過新預設；fish 授權後 13:55 改成 `POLL=0.25` 並重啟，四服務 active，輪詢 0.25 秒生效。
+- 10-27 第三批（FR-20261027-exec-details 第三批）：盤口一變就評估（feeds.BookFeed.changed 事件，sim 迴圈 wait 取代 sleep，POLL 當後盾），決策落後盤口從平均 0.125 秒降到約 0.05 秒。量過：迴圈沒卡（間隔 99.6% 在 0.45～0.6 秒）、CPU steal 0.1%。
+- fish 說最後會把主機搬到倫敦：**英國在 Polymarket 封鎖名單（close-only，API 也不能開新倉）**，搬了還是要代理出口；倫敦到美東交易所各多 40～80 ms，效能上沒好處。細節與替代方案在 `Docs/operations/todo.md` B2。
 - 10-27 13:01 部署：主機 repo 已對齊 GitHub（分支 btc5m-sim/shadow-variants，3dce6d7），四個 sim 服務在安全時刻重啟、全部 active，簽名 Worker 暖連線上線。之後部署一律：本機 commit → push → 主機 `bash btc5m_sim/update_and_restart.sh`（會自己等到收盤後 5～140 秒才重啟）。驗證方式：下一筆真單在 journal 的 `live timing ... sign` 應比之前的 550～740 ms 少約 100 ms。

@@ -17,4 +17,12 @@ fish 10-27：「強化我們所能做的任何技術上的細節」，策略與�
 4. **修改後**：0.25 秒輪詢、盤口紀錄密度不變；每筆沒吃到的單多一列診斷；fee 欄有值、review 摘要顯示淨值。
 5. **影響檔案**：`btc5m_sim/sim.py`、`btc5m_sim/live.py`、`btc5m_sim/review.py`。
 6. **交易／下單／風控／資料判斷**：規則、價位帶、股數、停損、冷卻、事件停單都不變。決策時間平均提早約 0.1 秒（同一規則、同一條件，只是更早看到）。pnl 毛利不變 → 停損不變。live_miss.csv 只是診斷。
-7. **驗證**：92 個單元測試通過；部署後看 journal 的 `start [BTC] ... poll 0.25s`；隔天比 sim_book.csv 每場列數（應仍約 300 列）；有沒吃到的單時看 `live_miss.csv`；下一筆結算後 `live_results.csv` 最後一列 fee 非 0。
+7. **驗證**：92 個單元測試通過；部署後看 journal 的 `start [BTC] ... poll 0.25s`；隔天比 sim_book.csv 每場列數（應仍約 300 列）；有沒吃到的單時看 `live_miss.csv`；下一筆結算後 `live_results.csv` 最後一列 fee 非 0。fish 13:52 手動部署；主機 .env 的 POLL=0.5 蓋過預設，fish 授權後 13:55 改成 0.25 並重啟，啟動行 `poll 0.25s` 確認。
+
+## 第三批（同日下午）：盤口一變就評估，不再等輪詢
+
+- **量測**：10-26 18:00 起 41,743 個相鄰盤口紀錄的間隔 99.6% 在 0.45～0.6 秒，最大 1.0 秒 → 決策迴圈沒有卡住（看板推送在背景執行緒，REST 退回很少）；CPU 被搶佔（steal）0.1%，3 核、負載 1.1 → 主機不是瓶頸。剩下的決策延遲就是輪詢本身（0.25 秒輪詢平均落後 0.125 秒）。
+- **改了什麼**：`feeds.py` BookFeed 新增 `changed`（threading.Event），每次 snapshot 或 price_change 更新盤口後 set；`sim.py` 決策迴圈開頭 clear，迴圈尾用 `changed.wait(timeout=POLL−已用時間)` 取代 sleep：盤口一變就立刻再評估，沒變就最多等一個 POLL；`WAKE_MIN_GAP`（0.1 秒）限制最密 10 次/秒；`WAKE_ON_CHANGE=0` 退回純輪詢。sim_book 仍每 0.5 秒一列。
+- **修改前／後**：決策落後盤口平均 0.125 秒、最多 0.25 秒 → 平均約 0.05 秒、最多 0.1 秒（忙碌盤口）。規則、價位、股數、風控不變。
+- **影響檔案**：`btc5m_sim/feeds.py`、`btc5m_sim/sim.py`、`tests/test_btc5m_feeds.py`（新測試）。
+- **驗證**：單元測試；部署後啟動行有 `(wake on book change, min gap 0.1s)`；隔天看 sim_book 每場列數仍約 300、CPU 沒有明顯上升（`top` 的 python3 行）。

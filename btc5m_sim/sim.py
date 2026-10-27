@@ -49,6 +49,11 @@ SHARES = float(os.getenv("SHARES", "5"))
 POLL = float(os.getenv("POLL", "0.25"))                # 1.0 -> 0.5 s once the websocket feeds made each poll free of network calls;
                                                        # 0.5 -> 0.25 s 2026-10-27 (fish: 降低延遲): a decision now lags the book by <= 0.25 s
 BOOK_LOG_EVERY = float(os.getenv("BOOK_LOG_EVERY", "0.5"))   # sim_book.csv keeps one row per 0.5 s per market whatever POLL is
+# 2026-10-27 (fish: 再提升效能): a websocket book update wakes the decision loop at once instead of waiting for the next poll;
+# POLL stays as the backstop (REST fallback, quiet books). WAKE_MIN_GAP keeps a very busy book from running the loop more
+# than ~10 times a second. WAKE_ON_CHANGE=0 restores pure polling.
+WAKE_ON_CHANGE = os.getenv("WAKE_ON_CHANGE", "1").strip().lower() in ("1", "true", "yes", "on")
+WAKE_MIN_GAP = float(os.getenv("WAKE_MIN_GAP", "0.1"))
 USE_WS = os.getenv("USE_WS", "1").strip().lower() in ("1", "true", "yes", "on")
 WS_STALE = float(os.getenv("WS_STALE", "2.5"))          # seconds; older websocket data -> use REST for that poll
 _spot_feed = None                                        # feeds.SpotFeed, started in main()
@@ -458,6 +463,7 @@ def watch(start, rows, vrows, lock):
         pending = dict(vstate)
         while time.time() < end - LAST_ENTRY:
             t_loop = time.time()
+            if bf is not None and WAKE_ON_CHANGE: bf.changed.clear()   # any update from here on wakes the wait below early
             try:
                 books, ms = [], 0
                 for tok in m["tokens"]:
@@ -532,7 +538,13 @@ def watch(start, rows, vrows, lock):
                             [(n, rule_state(v, asks, lead, secs_left, lambda: dl_now, m["outcomes"], lambda: amp_now), n in live_set) for n, v in vstate.items()])
             except Exception as e:
                 row["note"] = f"book error {type(e).__name__}"
-            time.sleep(max(0, POLL - (time.time() - t_loop)))
+            gap = time.time() - t_loop
+            if bf is not None and WAKE_ON_CHANGE:
+                if gap < WAKE_MIN_GAP:
+                    time.sleep(WAKE_MIN_GAP - gap); gap = time.time() - t_loop
+                bf.changed.wait(timeout=max(0, POLL - gap))      # returns at once on a book update, else after the poll interval
+            else:
+                time.sleep(max(0, POLL - gap))
         if seen_asks:
             rng = f" lead ask {min(seen_asks)}-{max(seen_asks)} last {seen_asks[-1]}"
             if not row["entered"]:
@@ -671,7 +683,8 @@ def main():
             _spot_feed = feeds.SpotFeed(A["cb"]); _spot_feed.start(); log(f"ws feeds on: spot {A['cb']} via Coinbase ws, order books via Polymarket ws, REST fallback after {WS_STALE:g}s")
         except Exception as e:
             log(f"ws spot feed unavailable ({type(e).__name__}); REST only"); _spot_feed = None
-    log(f"start [{ASSET.upper()}]: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s; dist scale {DIST_SCALE:.4g}; "
+    log(f"start [{ASSET.upper()}]: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s"
+        f"{f' (wake on book change, min gap {WAKE_MIN_GAP:g}s)' if WAKE_ON_CHANGE and USE_WS else ''}; dist scale {DIST_SCALE:.4g}; "
         f"variants {[n for n, _, _, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")
     tg((f"🔴 {ASSET.upper()} {SLUG_LABEL} bot 啟動：真單模式（會真的下單）" if exec_mode == "live" else f"🟢 {ASSET.upper()} {SLUG_LABEL} 模擬 bot 啟動（{'dry：算好單但不送' if exec_mode == 'dry' else '不下單'}）")
        + f"\n規則：最後 {ENTRY_WINDOW} 秒，領先方賣價 {MIN_PRICE}~{MAX_PRICE} 就買 {SHARES:g} 股\n"

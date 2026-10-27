@@ -68,6 +68,7 @@ class BookFeed(threading.Thread):
         super().__init__(daemon=True); self.assets = [str(a) for a in asset_ids]; self.url = url
         self.lock = threading.Lock(); self.books = {a: {"bids": {}, "asks": {}, "ts": 0.0} for a in self.assets}
         self.msgs = 0; self.connected = False; self._stop = False
+        self.changed = threading.Event()     # set on every book update; the sim loop waits on it instead of sleeping a full poll
 
     # ---- pure state updates (unit-tested) ----
     def apply_snapshot(self, d, now=None):
@@ -76,6 +77,7 @@ class BookFeed(threading.Thread):
         with self.lock:
             self.books[a] = {"bids": {str(x["price"]): float(x["size"]) for x in d.get("bids", []) if float(x["size"]) > 0},
                              "asks": {str(x["price"]): float(x["size"]) for x in d.get("asks", []) if float(x["size"]) > 0}, "ts": now or time.time()}
+        self.changed.set()
 
     def apply_change(self, d, now=None):
         changes = d.get("price_changes") or d.get("changes") or []
@@ -91,6 +93,7 @@ class BookFeed(threading.Thread):
                 if size <= 0: b[side].pop(price, None)
                 else: b[side][price] = size
                 b["ts"] = now or time.time()
+        if changes: self.changed.set()
 
     def on_message(self, raw, now=None):
         try: d = json.loads(raw)
