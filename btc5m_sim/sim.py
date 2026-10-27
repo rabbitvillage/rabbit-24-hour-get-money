@@ -46,7 +46,9 @@ LAST_ENTRY = int(os.getenv("LAST_ENTRY", "5"))        # stop looking this many s
 MIN_PRICE = float(os.getenv("MIN_PRICE", "0.98"))
 MAX_PRICE = float(os.getenv("MAX_PRICE", "0.99"))
 SHARES = float(os.getenv("SHARES", "5"))
-POLL = float(os.getenv("POLL", "0.5"))                 # 1.0 -> 0.5 s once the websocket feeds made each poll free of network calls
+POLL = float(os.getenv("POLL", "0.25"))                # 1.0 -> 0.5 s once the websocket feeds made each poll free of network calls;
+                                                       # 0.5 -> 0.25 s 2026-10-27 (fish: 降低延遲): a decision now lags the book by <= 0.25 s
+BOOK_LOG_EVERY = float(os.getenv("BOOK_LOG_EVERY", "0.5"))   # sim_book.csv keeps one row per 0.5 s per market whatever POLL is
 USE_WS = os.getenv("USE_WS", "1").strip().lower() in ("1", "true", "yes", "on")
 WS_STALE = float(os.getenv("WS_STALE", "2.5"))          # seconds; older websocket data -> use REST for that poll
 _spot_feed = None                                        # feeds.SpotFeed, started in main()
@@ -451,7 +453,7 @@ def watch(start, rows, vrows, lock):
         row["price_to_beat"] = ptb
         feed.start_market(row["slug"], start)
         live.prefetch_tick(m)               # tick size looked up once per market, in the background (order speed-up 10-24)
-        seen_asks = []; series = []
+        seen_asks = []; series = []; last_logged = 0.0
         spot_min = spot_max = None          # price range seen since the book window opened (for the chop filter)
         pending = dict(vstate)
         while time.time() < end - LAST_ENTRY:
@@ -473,8 +475,10 @@ def watch(start, rows, vrows, lock):
                 lead = max((a[0] for a in asks if a[0] is not None), default=None)
                 if lead is not None and secs_left <= ENTRY_WINDOW:  # note range stays about the entry window
                     seen_asks.append(lead)
-                series.append(dict(slug=row["slug"], secs_left=secs_left, up_ask=asks[0][0], up_sh=round(asks[0][1], 2), up_usd=round(asks[0][2], 2),
-                                   down_ask=asks[1][0], down_sh=round(asks[1][1], 2), down_usd=round(asks[1][2], 2), spot=sp, fetch_ms=round(ms)))
+                if now - last_logged >= BOOK_LOG_EVERY - 0.02:   # the per-market curve stays at one row per 0.5 s (POLL is faster)
+                    series.append(dict(slug=row["slug"], secs_left=secs_left, up_ask=asks[0][0], up_sh=round(asks[0][1], 2), up_usd=round(asks[0][2], 2),
+                                       down_ask=asks[1][0], down_sh=round(asks[1][1], 2), down_usd=round(asks[1][2], 2), spot=sp, fetch_ms=round(ms)))
+                    last_logged = now
                 if not row["entered"] and secs_left <= ENTRY_WINDOW:
                     hit = evaluate(asks, MIN_PRICE, MAX_PRICE, SHARES)
                     if chop_block(hit, amp_now, secs_left):

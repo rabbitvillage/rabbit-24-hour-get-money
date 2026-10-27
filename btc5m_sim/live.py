@@ -165,6 +165,7 @@ def us_session_close_local(now=None):
     close = t.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
     return close.astimezone(TZ).strftime("%H:%M")
 SLIP = float(os.getenv("LIVE_SLIP", "0.01"))                 # pay up to ask + SLIP so a FOK still fills if the book moved
+FEE_RATE = float(os.getenv("LIVE_FEE_RATE", "0.07"))         # Polymarket crypto taker fee rate: fee = rate x p x (1-p) x shares (USDC, on top)
 PRICE_MIN, PRICE_MAX = 0.5, 0.99
 MAX_DAILY_LOSS_VARIANT = float(os.getenv("MAX_DAILY_LOSS_VARIANT", "15"))
 MAX_DAILY_LOSS_TOTAL = float(os.getenv("MAX_DAILY_LOSS_TOTAL", "50"))
@@ -787,6 +788,8 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, 
         row["msg"] = (row["msg"] + " " + str({k: resp.get(k) for k in ("status", "makingAmount", "takingAmount", "errorMsg")})).strip()
         _log(f"live {row['status']} {variant} {slug} BUY {outcome} {shares}@{price} id={row['order_id'][:12]} {row['msg'][:90]}")
         _notify(f"{'✅' if row['status']=='filled' else '⚠️'} [{ASSET.upper()}] 真單 {row['status']} {variant}\n{slug} 買 {outcome} {shares:g} 股 @{price}（${usdc:.2f}，剩 {secs_left}s）")
+        if row["status"] in ("unfilled", "rejected"):      # what did the exchange's book look like right after the miss? (diagnostics only)
+            threading.Thread(target=_snapshot_miss, args=(dict(row), token, price, ask, tm.get("post") or time.time()), daemon=True).start()
         return row
     except Exception as e:
         row["status"] = row["status"] or "error"; row["msg"] = (row["msg"] + " " + type(e).__name__ + " " + str(e)[:120]).strip()
@@ -801,13 +804,41 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, 
         _record_timing(row, tm, seen_at, book_ms, t_call)
 
 
+MFIELDS = ["ts", "variant", "slug", "outcome", "status", "secs_left", "ask_seen", "limit", "best_ask_after", "shares_le_limit",
+           "asks_after", "snapshot_ms", "msg"]
+
+
+def _snapshot_miss(row, token, limit, ask_seen, t_answer):
+    """2026-10-27 (fish: 強化技術細節): after a FAK that did not fill, fetch the exchange's REST book for that token at once
+    (direct, ~0.2 s) and record the best ask and the shares that were available at or below our limit. Tells, per miss,
+    whether the price had simply run above ask + SLIP during the ~1 s in flight (best_ask_after > limit) or whether the
+    book we decided on was wrong (shares at <= limit still there). live_miss.csv, never raises, never affects trading."""
+    try:
+        t0 = time.time(); b = _get(f"{CLOB}/book?token_id={token}", timeout=5)
+        asks = sorted(((float(x["price"]), float(x["size"])) for x in b.get("asks", []) if float(x["size"]) > 0))
+        best = asks[0][0] if asks else ""
+        le = round(sum(s for p, s in asks if p <= float(limit) + 1e-9), 2)
+        rec = dict(ts=row.get("ts"), variant=row.get("variant"), slug=row.get("slug"), outcome=row.get("outcome"), status=row.get("status"),
+                   secs_left=row.get("secs_left"), ask_seen=ask_seen, limit=limit, best_ask_after=best, shares_le_limit=le,
+                   asks_after=" ".join(f"{p:g}x{s:g}" for p, s in asks[:4]), snapshot_ms=round((t0 - t_answer) * 1000), msg=str(row.get("msg", ""))[:60])
+        with _lock:
+            _append("live_miss.csv", MFIELDS, rec)
+        _log(f"live miss-check {row.get('variant')} {row.get('slug')} {row.get('outcome')}: saw {ask_seen}, limit {limit}, book now best {best} ({le} sh <= limit) {rec['snapshot_ms']}ms after answer")
+    except Exception as e:
+        _log(f"live miss-check failed {type(e).__name__}")
+
+
 def settle(slug, winner):
     """Called by sim once a market resolved. Books P&L for every filled (or dry) order on it and applies the stops."""
     day = today(); trips = []
     with _lock:
         for (variant, s), row in list(_orders.items()):
             if s != slug or row.get("status") not in ("filled", "dry"): continue
-            size = float(row["filled_size"] or row["size"]); cost = float(row["cost"] or 0); fee = 0.0   # V2 taker fee is already inside the fill
+            size = float(row["filled_size"] or row["size"]); cost = float(row["cost"] or 0)
+            # Exchange taker fee, verified on chain 2026-10-26 (649 fills): 7% x p x (1-p) per share, charged in USDC on top of
+            # `cost` (makingAmount). Recorded in the fee column for reporting; pnl stays gross so the daily stops behave exactly
+            # as before (fish: risk parameters frozen until 11-02). Net = pnl - fee.
+            p_fill = cost / size if size else 0.0; fee = round(FEE_RATE * p_fill * (1 - p_fill) * size, 4) if row["status"] == "filled" else 0.0
             won = int(row["outcome"] == winner); pnl = round((size if won else 0) - cost, 4)
             if row["status"] == "filled":                      # dry orders are not booked into the stops
                 _daily.setdefault(day, {}); _daily[day][variant] = _daily[day].get(variant, 0.0) + pnl

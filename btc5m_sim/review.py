@@ -52,7 +52,7 @@ def load(d):
         try: fill = float(o["cost"]) / float(o["filled_size"])
         except (ValueError, ZeroDivisionError): fill = float(o["ask"] or 0)
         res.append(dict(t=_ts(r["ts"]), rule=r["variant"], slug=r["slug"], won=r["won"] == "1", pnl=float(r["pnl"] or 0),
-                        ask=float(o["ask"] or 0), fill=fill))
+                        fee=float(r.get("fee") or 0), ask=float(o["ask"] or 0), fill=fill))
     return orders, res
 
 
@@ -121,7 +121,7 @@ def review_coin(coin, d, unit, now, act=True):
         w0 = max(w0, datetime.fromisoformat(SINCE).astimezone(TZ))
     win = [r for r in res if w0 < r["t"] <= now]; base = [r for r in res if b0 < r["t"] <= w0]
     n, l = len(win), sum(1 for r in win if not r["won"])
-    out.update(window_n=n, window_losses=l, window_pnl=round(sum(r["pnl"] for r in win), 2))
+    out.update(window_n=n, window_losses=l, window_pnl=round(sum(r["pnl"] for r in win), 2), window_fee=round(sum(r["fee"] for r in win), 2))
     # 1) health: things with an obvious cause
     if unit and act and subprocess.run(["systemctl", "is-active", "--quiet", unit]).returncode != 0:
         out.update(decision="fix", reason="服務沒有在跑"); do("restart", f"重啟 {unit}"); return out
@@ -189,7 +189,8 @@ def main(argv=None):
         d = sub if os.path.isabs(sub) else os.path.join(BASE_DIR, sub)
         o = review_coin(coin, d, unit, now, act=not dry)
         msg = f"{ICON[o['decision']]} [{coin}] 自我檢討：{WORD[o['decision']]}。{o['reason']}" + (f"｜處理：{o['action']}" if o["action"] else "") \
-              + f"｜近 {WINDOW_H:g} 小時真單 {o['window_n']} 筆輸 {o['window_losses']}，淨 {o['window_pnl']:+.2f}"
+              + f"｜近 {WINDOW_H:g} 小時真單 {o['window_n']} 筆輸 {o['window_losses']}，淨 {o['window_pnl']:+.2f}" \
+              + (f"（扣手續費 {o['window_pnl'] - o['window_fee']:+.2f}）" if o.get("window_fee") else "")
         print(now.strftime("%m-%d %H:%M"), msg)
         if dry: continue
         p = os.path.join(d, "review_log.csv"); new = not os.path.exists(p)

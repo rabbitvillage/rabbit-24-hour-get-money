@@ -10,6 +10,7 @@ fish 10-27 的題目：有沒有辦法「增加安全、不損失利益」。下
    - 做什麼：`live.py` settle() 把 `fee = 0.0` 改成 7%×p×(1−p)×股數；`review.py`、`push_dashboard.py` 加總時只算 `live_orders.csv` 有 filled 的鍵（`live_results.csv` 混有 dry 列、沒有 status 欄）。
    - 為什麼：650 筆真單帳本 +$44.71，實際 +$14.06。11-02 用帳本數字會把 2% 門檻看成達標。
    - 安全：加碼決定不會建立在高估的損益上。利益：0。成本：小。臨時做法：`Docs/custom-queries/audit_chain.py`。
+   - 10-27 進度：`fee` 欄已從 10-27 13:2x 起記真實手續費（FR-20261027-exec-details），review 摘要顯示淨值；`pnl` 仍是毛利（停損不變）。剩下：11-02 後決定 pnl 是否改淨值、看板是否顯示淨值。
 
 2. **只在異常時通知**
    - 做什麼：STOP 檔被自動放上、服務不是 active、連續 3 小時沒有任何送單（含 skip）→ 才發 Telegram；平常靜音。
@@ -19,6 +20,7 @@ fish 10-27 的題目：有沒有辦法「增加安全、不損失利益」。下
 3. **盤口來源健康檢查（no-match 升到 50%）**
    - 做什麼：BTC 送單「找不到對手單」10-21 是 0%、10-23～24 是 20%、10-27 是 5/10。先累積兩天；用 `python -m btc5m_sim.feeds` 比 websocket 和 REST 的差；若 ws 的書太舊，加「超過 N 秒沒更新就退回 REST」的門檻。
    - 安全：避免拿舊盤口下單（舊盤口不只會沒成交，也可能成交在已經變壞的價位）。利益：成交率回升，反而增加。成本：中。
+   - 10-27 結果：量過了，盤口不舊（ws 與 REST 領先方賣價 130/135 相同；REST 退回只佔最後 60 秒輪詢的 4%）。沒吃到是價格在 1 秒內跑掉。已加 `live_miss.csv` 逐筆記錄沒吃到時交易所的盤口，累積一週後再決定 slip 要不要動（那是執行參數，11-02 後談）。
 
 4. **主機 repo 對齊**
    - 做什麼：主機 /opt 的 checkout 停在 c5e69c8，review.py、io_monitor.py、兩個 io unit 檔是直接放上去的（內容與本機一致）。pull 前先 `git checkout btc5m_sim/review.py` 並比對三個檔；之後固定走 commit → push → pull。
