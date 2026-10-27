@@ -1,6 +1,6 @@
 # FR-20261027-recheck-before-send：送單前再看一次盤口，領先方崩掉就不買
 
-- 狀態：active（fish 10-27 19:2x 裁示部署；19:30:06 主機 daeba31、四服務 active；等第一筆真單走過 aborted／filled 流程後轉 verified）
+- 狀態：active（fish 10-27 19:2x 裁示部署；19:30:06 主機 daeba31、四服務 active。19:54:00 第一次動作：`live aborted w60_m95_s20 ... Down: ask rose 0.94 -> 0.98 above limit 0.96 before post`，簽名花了 1,001 ms，省掉一筆必然 no-match 的單；「掉 ≥0.05 擋下」的樣本還沒出現，出現後轉 verified）
 - 起因：2026-10-27 18:34 BTC 真單「決定在 0.84、成交在 0.57」，輸 $7.90。
 
 ## 1. 這次改了什麼

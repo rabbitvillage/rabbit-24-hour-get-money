@@ -1,6 +1,6 @@
 # FR-20261027-cooldown-at-close：收盤即判輸贏啟動冷卻、重啟補冷卻、執行層地板、盤口一致性開關
 
-- 狀態：active（程式與測試已進 repo；主機未部署，等 fish 決定）
+- 狀態：active（fish 10-27 裁示部署；20:00:35 主機 c52d2d3、四服務 active；等第一筆輸單看到 `closing book says ...` 先於 `live settle` 後轉 verified）
 - 來源：`Docs/operations/structural-review-20261027.md`（fish：「用同樣的道理檢查整套系統」）
 
 ## 1. 這次改了什麼
