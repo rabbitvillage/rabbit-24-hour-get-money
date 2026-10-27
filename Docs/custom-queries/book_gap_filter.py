@@ -13,9 +13,10 @@ os.chdir(os.path.join(os.getenv("REPO", "/opt/rabbit-24-hour-get-money"), "btc5m
 def f(v):
     try: return float(v)
     except (TypeError, ValueError): return None
+US0, US1 = os.getenv("US_SESSION_START", "09:00"), os.getenv("US_SESSION_END", "17:00")   # the host .env pauses 09:00-17:00 New York
 def us_open(ts):
     t = datetime.fromtimestamp(ts, NY)
-    return t.weekday() < 5 and "09:30" <= t.strftime("%H:%M") < "16:00"
+    return t.weekday() < 5 and US0 <= t.strftime("%H:%M") < US1
 lead_min = {}
 for r in csv.DictReader(open("sim_decisions.csv")):
     if f(r.get("lead_min")) is not None: lead_min[(r["slug"], r["variant"])] = f(r["lead_min"])
