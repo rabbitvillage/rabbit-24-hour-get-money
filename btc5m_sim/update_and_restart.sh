@@ -7,10 +7,11 @@
 # back before the next market's book window opens (150 s before its close). So restart between close+5 s and close+140 s.
 # The restart loses nothing that matters: today's realised P&L (the stops) is reloaded from live_results.csv.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "${REPO:-$(dirname "$0")/..}"      # REPO=/opt/... lets a copy of this script run from anywhere (first deploy)
 SERVICES=("$@"); [ ${#SERVICES[@]} -eq 0 ] && SERVICES=(btc5m-sim btc5m-sim@sol btc5m-sim@eth btc5m-sim@btc15)
 
 if [ "${NO_PULL:-0}" != "1" ]; then
+  git fetch --quiet origin
   # Host copies of files that were once edited in place (same content as the commits) would block the pull: restore them.
   for f in btc5m_sim/review.py; do
     if ! git diff --quiet -- "$f"; then echo "restoring host-edited $f (committed version is identical)"; git checkout -- "$f"; fi
@@ -20,7 +21,6 @@ if [ "${NO_PULL:-0}" != "1" ]; then
       if git cat-file -e "origin/$(git rev-parse --abbrev-ref HEAD):$f" 2>/dev/null; then echo "removing untracked $f (tracked upstream)"; rm -f "$f"; fi
     fi
   done
-  git fetch --quiet origin
   git pull --ff-only
 else
   echo "NO_PULL=1: restarting with the files already on disk"
