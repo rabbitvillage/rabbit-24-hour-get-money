@@ -112,7 +112,9 @@ class DryAndSettle(unittest.TestCase):
         self.assertEqual(row["status"], "aborted"); self.assertIn("side collapsing", row["msg"])
         row = live._submit("w60_m95_s20", market("btc-updown-5m-2"), 1, 0.84, 36.6, mode="dry", book_fn=lambda: 0.82)
         self.assertEqual(row["status"], "dry")
-        self.assertEqual([r["status"] for r in self.rows("live_orders.csv")], ["aborted", "dry"])
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-3"), 1, 0.82, 36.6, mode="dry", book_fn=lambda: 0.79)   # a 3-cent dip, but under the 0.80 floor
+        self.assertEqual(row["status"], "aborted"); self.assertIn("under floor 0.8", row["msg"])
+        self.assertEqual([r["status"] for r in self.rows("live_orders.csv")], ["aborted", "dry", "aborted"])
 
     def test_settle_books_pnl_and_trips_stops(self):
         live._submit("w60_m95_s10", market(), 0, 0.80, 55.0, mode="dry")

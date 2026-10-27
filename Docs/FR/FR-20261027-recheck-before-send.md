@@ -5,7 +5,7 @@
 
 ## 1. 這次改了什麼
 
-`live.py` 的送單執行緒在兩個時間點用 websocket『即時推送』盤口再看一次領先方的最佳賣價（不打網路，約 0 ms）：簽名前、以及簽好名要 POST 前。只要賣價比規則決定時看到的低 ≥ `LIVE_RECHECK_DROP`（預設 0.05）—— 代表這一邊正在崩 —— 或已經高過送單上限（ask + SLIP），就不送單，帳本記 `status=aborted`『取消』。`sim.py` 把每個 token 的「現在最佳賣價」函式（`ask_now`）傳給 `live.submit`。`LIVE_RECHECK_DROP=0` 關閉。
+`live.py` 的送單執行緒在兩個時間點用 websocket『即時推送』盤口再看一次領先方的最佳賣價（不打網路，約 0 ms）：簽名前、以及簽好名要 POST 前。只要賣價比規則決定時看到的低 ≥ `LIVE_RECHECK_DROP`（預設 0.05）—— 代表這一邊正在崩 —— 或低於 `LIVE_RECHECK_FLOOR`（預設 0.80，fish 10-27：「80～97 可以接受，50 太離譜」），或已經高過送單上限（ask + SLIP = 最高 0.97），就不送單，帳本記 `status=aborted`『取消』。`sim.py` 把每個 token 的「現在最佳賣價」函式（`ask_now`）傳給 `live.submit`。`LIVE_RECHECK_DROP=0` 關閉。
 
 ## 2. 為什麼要改
 
@@ -33,7 +33,8 @@ FAK『成交多少算多少，剩下取消』市價買單只有上限（ask + SL
 
 ## 5. 影響的檔案
 
-- `btc5m_sim/live.py`：`RECHECK_DROP`、`_book_moved()`、`submit()/_submit()` 多一個 `book_fn` 參數、兩處再檢查。
+- `btc5m_sim/live.py`：`RECHECK_DROP`、`RECHECK_FLOOR`、`_book_moved()`、`submit()/_submit()` 多一個 `book_fn` 參數、兩處再檢查。
+- 擋不住的部分（要誠實）：最後一次檢查之後還有約 0.35 秒的送單＋撮合時間；在那 0.35 秒內才崩的盤口，成交仍可能便宜。18:34 那筆從 0.84 掉到 0.73 花了 0.4 秒、到 0.57 花了 0.9 秒，兩個檢查點都會擋住；更快的崩盤沒有客戶端辦法，只能靠決定前的過濾（todo 第 13 項）。
 - `btc5m_sim/sim.py`：`ask_now()`，兩處 `live.submit(...)` 傳 `book_fn`。
 - `tests/test_btc5m_live.py`：三個新測試（POST 前擋住崩盤、簽名前擋住跑高、關閉開關；dry 也記 aborted）。
 - `Docs/custom-queries/fill_discount.py`、`book_gap_filter.py`：證據腳本。

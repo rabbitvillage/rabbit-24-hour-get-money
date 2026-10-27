@@ -172,6 +172,7 @@ SLIP = float(os.getenv("LIVE_SLIP", "0.01"))                 # pay up to ask + S
 # thread re-reads the websocket book (no network): if the side's best ask has fallen by RECHECK_DROP or more under the ask
 # the rule decided on, or has risen above the limit, the order is not sent (status "aborted"). 0 = off.
 RECHECK_DROP = float(os.getenv("LIVE_RECHECK_DROP", "0.05"))
+RECHECK_FLOOR = float(os.getenv("LIVE_RECHECK_FLOOR", "0.80"))   # fish 10-27: 0.80-0.97 is acceptable, 0.5x is not -> never send under this
 FEE_RATE = float(os.getenv("LIVE_FEE_RATE", "0.07"))         # Polymarket crypto taker fee rate: fee = rate x p x (1-p) x shares (USDC, on top)
 PRICE_MIN, PRICE_MAX = 0.5, 0.99
 MAX_DAILY_LOSS_VARIANT = float(os.getenv("MAX_DAILY_LOSS_VARIANT", "15"))
@@ -713,6 +714,8 @@ def _book_moved(book_fn, ask, limit, stage):
         return None
     if cur <= ask - RECHECK_DROP + 1e-9:
         return f"ask fell {ask} -> {cur} before {stage}: side collapsing, not buying"
+    if cur < RECHECK_FLOOR - 1e-9:
+        return f"ask fell {ask} -> {cur} under floor {RECHECK_FLOOR:g} before {stage}: not buying"
     if cur > limit + 1e-9:
         return f"ask rose {ask} -> {cur} above limit {limit} before {stage}: not sending"
     return None
