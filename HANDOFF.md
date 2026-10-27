@@ -14,4 +14,7 @@
 - 尾盤 0.98 結論（10-26）：扣費後每 $1 剩 0～0.3 分，看板主規則影子 592 筆 +$4.44 ≈ 0。BTC 0.97 最後 45 秒每股約 +1 分、一天約 38 次，但翻船只有 6 次樣本；sim_book 再累積一個月後重跑 tail98.py 再議。
 - 手操對帳（鏈上）：10-24 手操 58 場、周轉 $1,651、手續費 $33、−$114.67；19:04 前 34 場 +$76（勝率 74%、每場 $21），之後 24 場 −$191（勝率 46%、每場 $39、42% 同場兩邊都買）；兩段的行情統計相同。全部手操 181 場 −$208。
 - 21:35 補：新增 IO『獨立作業』影子監測（fish：最後 60 秒出現 0.97 就買，只看勝率、不算滑價）。獨立程序 `btc5m_sim/io_monitor.py`＋`btc5m-io.timer`（每 5 分鐘），不下單、不碰真單程式與 .env；報表 `btc5m_sim/io/<asset>/io_report.txt` 或 `python3 -m btc5m_sim.io_monitor --report`。主機 timer 已啟用，帳本從 10-26 21:34 起算，10-27 晚上看一天結論。9 天歷史試跑：BTC 翻船 2.25%（損益兩平 2.80%）、ETH 3.60%、SOL 3.03%。停掉：`systemctl disable --now btc5m-io.timer`。FR：Docs/FR/FR-20261026-io-monitor.md。
+- 10-27 11:35 狀態：真單 BTC 17:45 起 7 筆全贏（帳本 +$4.82，扣費約 +$4.5），送單 13 筆有 6 筆沒吃到；SOL 0 筆；無 STOP；IO 監測 14 小時三幣合計 164 場翻船 5（3.05%，非美股 1/89、美股 4/75）。
+- 後續清單（驗收期內不做）：`Docs/operations/todo.md` — fish 10-27 要的「加安全、不損利」候選，已分成不損利／可能加利／會少做／不建議四組。fish 10-27 裁示：效能與延遲優先做，策略不動。
+- 10-27 延遲工作（FR-20261027-signer-keepalive）：簽名 Worker 改暖連線＋啟動時預取身分，預期每筆省約 100 ms；Worker 內部簽名多花 400～1,000 ms（whoami 0.1～0.2 s、dry 驗證 0.2 s、真簽名 0.5～1.3 s），原始碼在 fish 的 rcss-sniper repo，不在主機，要改得 fish 來。ws 盤口與 REST 比對（Docs/custom-queries/ws_vs_rest.py）最後 90 秒最佳賣價一致 → 「找不到對手單」是價格在 1～1.3 秒內跑掉，不是盤口舊。
 - 主機 repo 狀態：/opt 的 checkout 停在 c5e69c8；review.py 的 REVIEW_SINCE、io_monitor.py、兩個 io unit 檔都是直接放上主機（未 commit，內容和本機 commit 相同）。下次在主機 `git pull` 前先 `git checkout btc5m_sim/review.py` 並比對那三個檔，否則會被擋。

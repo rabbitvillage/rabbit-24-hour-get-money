@@ -59,6 +59,14 @@ data-api 每分鐘抓太多會回 429『請求太多』，腳本已經每頁停 
 - **怎麼看**：`ret` 是帳本報酬率，**沒扣手續費**（0.98 約 0.14%、0.90 約 0.63%，用 audit_chain.py 的數字扣）。`avg(fill-ask)` 負數表示平均成交比看到的便宜，但會被翻盤後成交的極端值拉低，看分布請用 fill_slip_hist.py。
 - **不能拿去下單的情況**：每個價位幾十筆，一筆輸單就改變結論。
 
+## ws_vs_rest.py：websocket 盤口和 REST 一不一樣
+
+- **用途**：自己開一條 BookFeed『盤口即時推送』，在每場最後 90 秒每秒拿 REST /book 來比：兩邊最佳賣價、ws 盤口幾秒沒更新、層數、0.97 以下的深度。看「找不到對手單」是不是盤口舊（phantom『ws 有、REST 沒有』）或成交比看到的便宜很多（missing『REST 有更便宜的、ws 不知道』）。不碰機器人。
+- **參數**：`<幣> <觀察幾場>`
+- **怎麼跑**：`cd /opt/rabbit-24-hour-get-money && nohup python3 Docs/custom-queries/ws_vs_rest.py btc 3 > /tmp/ws_vs_rest.log 2>&1 &`，看 `grep SUMMARY /tmp/ws_vs_rest.log`
+- **怎麼看**：`fav_same / fav_cmp` 是領先方（0.5～0.99）最佳賣價相同的比例；`fav_phantom`、`fav_missing` 要接近 0。2026-10-27 12:03 跑 BTC：第一場 37/37 相同、0 phantom、0 missing。
+- **不能拿去下單的情況**：這是資料品質檢查，不是訊號。
+
 ## fill_slip_hist.py：成交價比看到的賣價差幾分
 
 - **用途**：真單成交價減決定時賣價的分布（分），和看盤口到交易所回覆的平均延遲。

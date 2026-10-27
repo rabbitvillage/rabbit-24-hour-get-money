@@ -244,6 +244,8 @@ def init(notify=None, log=None):
     _recover_pending()
     if MODE == "live" and WARM_EVERY > 0:
         threading.Thread(target=_keep_warm, daemon=True).start()
+    if MODE == "live" and SIGNER_KEEPALIVE and SIGNER_URL.startswith("https://") and SIGNER_WARM_EVERY > 0:
+        threading.Thread(target=_signer_keep_warm, daemon=True).start()
     if MODE == "live":
         threading.Thread(target=_balance_loop, daemon=True).start()
     if MODE == "live" and (PAUSE_US_SESSION or os.path.exists(EVENTS_FILE)):
@@ -477,17 +479,69 @@ def new_salt():
     return int.from_bytes(os.urandom(7), "big") & ((1 << 53) - 1)   # fits a JS safe integer, like the SDK
 
 
+# 2026-10-27 signer keep-alive (fish: 降低延遲). live_timing: sign_ms median 550-740 ms, of which a new TCP + TLS handshake
+# to the Worker edge is ~110 ms per order (curl: connect 30 ms, TLS 75 ms). The sign call now reuses one warm HTTPS
+# connection (fresh one on any socket error, once), warmed every SIGNER_WARM_EVERY s with a GET the Worker answers 405
+# to. identity() is also fetched at start-up so the first order after a restart does not pay the whoami round trip.
+SIGNER_KEEPALIVE = os.getenv("SIGNER_KEEPALIVE", "1").strip().lower() in ("1", "true", "yes", "on")
+SIGNER_WARM_EVERY = float(os.getenv("SIGNER_WARM_EVERY", "60"))
+_signer_pool = queue.Queue()
+
+
+def _signer_conn(timeout=8):
+    u = urllib.parse.urlsplit(SIGNER_URL)
+    c = http.client.HTTPSConnection(u.hostname, u.port or 443, timeout=timeout)
+    c.connect()
+    return c
+
+
 def worker(op, payload=None, timeout=8):
-    """POST one op to the signer Worker. Never logs the token."""
+    """POST one op to the signer Worker, on a kept-alive connection when SIGNER_KEEPALIVE (default). Never logs the token."""
     body = json.dumps({"op": op, **(payload or {})})
-    req = urllib.request.Request(SIGNER_URL, data=body.encode(), method="POST",
-                                 headers={**UA, "content-type": "application/json", "authorization": f"Bearer {SIGNER_TOKEN}"})
+    headers = {**UA, "content-type": "application/json", "authorization": f"Bearer {SIGNER_TOKEN}"}
+    if SIGNER_KEEPALIVE and SIGNER_URL.startswith("https://"):
+        u = urllib.parse.urlsplit(SIGNER_URL); path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+        for attempt in (1, 2):
+            c = None
+            if attempt == 1:
+                try: c = _signer_pool.get_nowait()
+                except queue.Empty: c = None
+            try:
+                if c is None: c = _signer_conn(timeout)
+                c.request("POST", path, body=body.encode(), headers=headers)
+                r = c.getresponse(); data = r.read()
+                _signer_pool.put(c)
+                try: return r.status, json.loads(data)
+                except Exception: return r.status, {"ok": False, "reason": f"http {r.status}"}
+            except (http.client.HTTPException, OSError):
+                try: c.close()
+                except Exception: pass
+                if attempt == 2: raise
+    req = urllib.request.Request(SIGNER_URL, data=body.encode(), method="POST", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, json.load(r)
     except urllib.error.HTTPError as e:
         try: return e.code, json.load(e)
         except Exception: return e.code, {"ok": False, "reason": f"http {e.code}"}
+
+
+def _signer_keep_warm():
+    """Keep one warm connection to the Worker: a GET on the sign path every SIGNER_WARM_EVERY s (405, ~0.1 s), so the
+    next signature skips the handshake. Also fetches identity() once so the first order does not pay for whoami."""
+    try: identity()
+    except Exception as e: _log(f"live: identity prefetch failed {type(e).__name__}")
+    u = urllib.parse.urlsplit(SIGNER_URL); path = u.path or "/"
+    while True:
+        time.sleep(SIGNER_WARM_EVERY)
+        c = None
+        try:
+            try: c = _signer_pool.get_nowait()
+            except queue.Empty: c = _signer_conn()
+            c.request("GET", path, headers=UA); c.getresponse().read(); _signer_pool.put(c)
+        except Exception:
+            try: c.close()
+            except Exception: pass
 
 
 def identity():
