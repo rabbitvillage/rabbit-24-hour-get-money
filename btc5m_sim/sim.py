@@ -458,7 +458,7 @@ def watch(start, rows, vrows, lock):
         row["price_to_beat"] = ptb
         feed.start_market(row["slug"], start)
         live.prefetch_tick(m)               # tick size looked up once per market, in the background (order speed-up 10-24)
-        seen_asks = []; series = []; last_logged = 0.0
+        seen_asks = []; series = []; last_logged = 0.0; last_feed = 0.0
         spot_min = spot_max = None          # price range seen since the book window opened (for the chop filter)
         pending = dict(vstate)
         while time.time() < end - LAST_ENTRY:
@@ -531,11 +531,13 @@ def watch(start, rows, vrows, lock):
                         if csamples:
                             v["chain_at_entry"] = csamples[-1][1]; v["chain_age_at_entry"] = round(now - csamples[-1][2])
                         del pending[name]
-                ref = chain_at_start if chain_at_start is not None else spot_at_start
-                dl_now = None if sp is None or ref is None else round(sp - ref, 2)
-                live_set = live.LIVE_VARIANTS or {n for n, *_ in VARIANTS}
-                feed.update(row["slug"], secs_left, asks, m["outcomes"], dl_now, "鏈上開盤價" if chain_at_start is not None else "Coinbase 開盤價",
-                            [(n, rule_state(v, asks, lead, secs_left, lambda: dl_now, m["outcomes"], lambda: amp_now), n in live_set) for n, v in vstate.items()])
+                if now - last_feed >= BOOK_LOG_EVERY - 0.02:     # dashboard commentary (15 rule texts) only every 0.5 s: the pusher sends every 5 s anyway
+                    ref = chain_at_start if chain_at_start is not None else spot_at_start
+                    dl_now = None if sp is None or ref is None else round(sp - ref, 2)
+                    live_set = live.LIVE_VARIANTS or {n for n, *_ in VARIANTS}
+                    feed.update(row["slug"], secs_left, asks, m["outcomes"], dl_now, "鏈上開盤價" if chain_at_start is not None else "Coinbase 開盤價",
+                                [(n, rule_state(v, asks, lead, secs_left, lambda: dl_now, m["outcomes"], lambda: amp_now), n in live_set) for n, v in vstate.items()])
+                    last_feed = now
             except Exception as e:
                 row["note"] = f"book error {type(e).__name__}"
             gap = time.time() - t_loop
