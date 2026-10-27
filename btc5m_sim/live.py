@@ -165,6 +165,13 @@ def us_session_close_local(now=None):
     close = t.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
     return close.astimezone(TZ).strftime("%H:%M")
 SLIP = float(os.getenv("LIVE_SLIP", "0.01"))                 # pay up to ask + SLIP so a FOK still fills if the book moved
+# 2026-10-27 18:34 (BTC: decided on Down at 0.84, filled at an average of 0.57, lost): a FAK spends the whole USDC amount at
+# whatever asks sit at or below the limit, so when the side collapses during the ~1 s between the decision and the match we
+# buy MORE shares of a side that is losing its lead. 661 real fills: the 54 filled >= 0.05 under the ask seen lost 14 (-$32.7),
+# the 485 filled at the ask or above lost 10 (+$92.7). So right before signing and again right before the POST the submit
+# thread re-reads the websocket book (no network): if the side's best ask has fallen by RECHECK_DROP or more under the ask
+# the rule decided on, or has risen above the limit, the order is not sent (status "aborted"). 0 = off.
+RECHECK_DROP = float(os.getenv("LIVE_RECHECK_DROP", "0.05"))
 FEE_RATE = float(os.getenv("LIVE_FEE_RATE", "0.07"))         # Polymarket crypto taker fee rate: fee = rate x p x (1-p) x shares (USDC, on top)
 PRICE_MIN, PRICE_MAX = 0.5, 0.99
 MAX_DAILY_LOSS_VARIANT = float(os.getenv("MAX_DAILY_LOSS_VARIANT", "15"))
@@ -684,11 +691,31 @@ def _append(name, fields, row):
         w.writerow({k: ("" if row.get(k) is None else row.get(k)) for k in fields})
 
 
-def submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, book_ms=None):
+def submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, book_ms=None, book_fn=None):
     """Non-blocking: builds + (live) sends one BUY for `variant` on `market` (dict from sim.market()).
-    seen_at / book_ms: when the order books behind this decision were fetched and how long that took (timing only)."""
+    seen_at / book_ms: when the order books behind this decision were fetched and how long that took (timing only).
+    book_fn: no-argument callable returning the side's current best ask from the websocket book (None = unknown); the
+    pre-send re-check (RECHECK_DROP) calls it right before signing and right before the POST."""
     threading.Thread(target=_submit, args=(variant, market, side_idx, ask, secs_left, mode),
-                     kwargs=dict(seen_at=seen_at, book_ms=book_ms, t_call=time.time()), daemon=True).start()
+                     kwargs=dict(seen_at=seen_at, book_ms=book_ms, t_call=time.time(), book_fn=book_fn), daemon=True).start()
+
+
+def _book_moved(book_fn, ask, limit, stage):
+    """The pre-send re-check (see RECHECK_DROP): the side's best ask now against the ask the rule decided on. Returns the
+    reason not to send, or None — also None when there is no websocket book to ask or the check is off."""
+    if book_fn is None or RECHECK_DROP <= 0:
+        return None
+    try:
+        cur = book_fn()
+    except Exception:
+        return None
+    if cur is None:
+        return None
+    if cur <= ask - RECHECK_DROP + 1e-9:
+        return f"ask fell {ask} -> {cur} before {stage}: side collapsing, not buying"
+    if cur > limit + 1e-9:
+        return f"ask rose {ask} -> {cur} above limit {limit} before {stage}: not sending"
+    return None
 
 
 def _ms(a, b):
@@ -719,7 +746,7 @@ def _record_timing(row, tm, seen_at, book_ms, t_call):
         _log(f"live timing record failed {type(e).__name__}")
 
 
-def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, book_ms=None, t_call=None):
+def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, book_ms=None, t_call=None, book_fn=None):
     tm = {"start": time.time(), "retried": 0}
     mode = mode or MODE
     slug = market["slug"]; outcome = market["outcomes"][side_idx]; token = market["tokens"][side_idx]
@@ -745,6 +772,10 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, 
         tm["tick"] = time.time()
         maker, taker, shares, usdc = amounts(price, size, tick)
         row["size"] = shares; row["cost"] = usdc
+        moved = _book_moved(book_fn, ask, price, "sign")        # the side collapsed (or ran away) since the decision -> no order
+        if moved:
+            row["status"] = "aborted"; row["msg"] = moved; _log(f"live aborted {variant} {slug} {outcome}: {moved}")
+            _notify(f"⚠️ [{ASSET.upper()}] 真單取消 {variant}\n{slug} 買 {outcome}：{moved}（剩 {secs_left}s）"); return row
         if mode != "live":
             row["status"] = "dry"; row["msg"] = f"not sent; would post {ORDER_TYPE} BUY {shares} sh for ${usdc:.2f}"
             _log(f"live DRY {variant} {slug} BUY {outcome} {shares}@{price} ${usdc:.2f} (ask {ask}, {secs_left}s)")
@@ -760,6 +791,10 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, 
         tm["sign"] = time.time()
         if st != 200 or not signed.get("ok") or not signed.get("signature"):
             row["status"] = "rejected"; row["msg"] = f"signer {st} {str(signed.get('reason') or signed)[:140]}"; raise RuntimeError(row["msg"])
+        moved = _book_moved(book_fn, ask, price, "post")        # signing took ~0.5 s: look once more before the order goes out
+        if moved:
+            row["status"] = "aborted"; row["msg"] = moved; _log(f"live aborted {variant} {slug} {outcome}: {moved}")
+            _notify(f"⚠️ [{ASSET.upper()}] 真單取消 {variant}\n{slug} 買 {outcome}：{moved}（剩 {secs_left}s）"); return row
         wire = dict(salt=order["salt"], maker=order["maker"], signer=order["signer"], tokenId=order["tokenId"],
                     makerAmount=order["makerAmount"], takerAmount=order["takerAmount"], side="BUY", expiration="0",
                     signatureType=1, timestamp=order["timestamp"], metadata=ZERO32, builder=ZERO32, signature=signed["signature"])

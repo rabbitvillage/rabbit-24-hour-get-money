@@ -107,6 +107,13 @@ class DryAndSettle(unittest.TestCase):
         self.assertEqual((row2["status"], row2["msg"]), ("skipped", "already ordered this market"))
         self.assertEqual(len(self.rows("live_orders.csv")), 2)
 
+    def test_dry_run_also_rechecks_the_book_before_sending(self):
+        row = live._submit("w60_m95_s20", market(), 1, 0.84, 36.6, mode="dry", book_fn=lambda: 0.70)
+        self.assertEqual(row["status"], "aborted"); self.assertIn("side collapsing", row["msg"])
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-2"), 1, 0.84, 36.6, mode="dry", book_fn=lambda: 0.82)
+        self.assertEqual(row["status"], "dry")
+        self.assertEqual([r["status"] for r in self.rows("live_orders.csv")], ["aborted", "dry"])
+
     def test_settle_books_pnl_and_trips_stops(self):
         live._submit("w60_m95_s10", market(), 0, 0.80, 55.0, mode="dry")
         live._orders[("w60_m95_s10", market()["slug"])]["status"] = "filled"      # pretend the exchange filled it
@@ -206,6 +213,33 @@ class FakPartialFill(unittest.TestCase):
         live.clob_request = lambda m, p, body=None, headers=None, _retry=True: (200, {"success": True, "status": "unmatched", "orderID": "o2", "makingAmount": "0", "takingAmount": "0"})
         row = live._submit("w45_p98_s20", market(), 1, 0.98, 30.0, mode="live")
         self.assertEqual(row["status"], "unfilled")
+
+    def test_recheck_before_post_stops_a_collapsing_side(self):
+        """10-27 18:34: decided on Down at 0.84; by the time the order was matched the side had collapsed and the FAK bought
+        at an average of 0.57. With the re-check the signed order is never posted when the ws book shows the ask fallen."""
+        posted = []
+        live.clob_request = lambda m, p, body=None, headers=None, _retry=True: posted.append(body) or (200, {"success": True, "status": "matched", "orderID": "o4", "makingAmount": "7.67", "takingAmount": "13.456141"})
+        seen = iter([0.84, 0.57])                                      # fine before signing, collapsed before the POST
+        row = live._submit("w60_m95_s20", market(), 1, 0.84, 36.6, mode="live", book_fn=lambda: next(seen))
+        self.assertEqual(row["status"], "aborted"); self.assertIn("fell 0.84 -> 0.57", row["msg"]); self.assertEqual(posted, [])
+        o = list(csv.DictReader(open(os.path.join(self.d.name, "live_orders.csv")))); self.assertEqual((o[-1]["status"], o[-1]["outcome"]), ("aborted", "Down"))
+        t = list(csv.DictReader(open(os.path.join(self.d.name, "live_timing.csv")))); self.assertEqual(t[-1]["status"], "aborted")
+        self.assertFalse(live.guard("w45_m95_s20", market()["slug"], 0.86, 5, mode="live", outcome="Down")[1].startswith("market already"))  # an aborted order holds no market slot
+        # a dip smaller than RECHECK_DROP, or no ws book at all, does not get in the way
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-2"), 1, 0.84, 36.6, mode="live", book_fn=lambda: 0.80)
+        self.assertEqual(row["status"], "filled"); self.assertEqual(len(posted), 1)
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-3"), 1, 0.84, 36.6, mode="live", book_fn=lambda: None)
+        self.assertEqual(row["status"], "filled"); self.assertEqual(len(posted), 2)
+
+    def test_recheck_before_sign_and_above_limit(self):
+        signed = []
+        live.worker = lambda op, payload=None, timeout=8: signed.append(op) or (200, {"ok": True, "signature": "0xsig", "digest": "0xd"})
+        live.clob_request = lambda m, p, body=None, headers=None, _retry=True: (200, {"success": True, "status": "matched", "orderID": "o5", "makingAmount": "1", "takingAmount": "1"})
+        row = live._submit("w60_m95_s20", market(), 0, 0.90, 50.0, mode="live", book_fn=lambda: 0.95)    # ran above the limit 0.91 (ask + SLIP) -> no signature, no order
+        self.assertEqual(row["status"], "aborted"); self.assertIn("rose 0.9 -> 0.95 above limit 0.91", row["msg"]); self.assertEqual(signed, [])
+        live.RECHECK_DROP = 0                                                                              # switched off: sent as before
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-2"), 0, 0.90, 50.0, mode="live", book_fn=lambda: 0.40)
+        self.assertEqual(row["status"], "filled"); live.RECHECK_DROP = 0.05
 
 
 class Recovery(unittest.TestCase):
