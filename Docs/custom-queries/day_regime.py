@@ -16,9 +16,10 @@ win = next((a for a in sys.argv[1:] if "-" in a and ":" in a), "05:00-16:30")
 H0, H1 = [int(x[:2]) * 60 + int(x[3:5]) for x in win.split("-")]
 RULE = next((a for a in sys.argv[1:] if a.startswith("w")), (os.getenv("LIVE_VARIANTS", "w60_m95_s20").split(",")[0]).strip())
 
+US0, US1 = os.getenv("US_SESSION_START", "09:00"), os.getenv("US_SESSION_END", "17:00")   # the host .env pauses 09:00-17:00 New York
 def us_open(ts):
     t = datetime.fromtimestamp(ts, NY)
-    return t.weekday() < 5 and "09:30" <= t.strftime("%H:%M") < "16:00"
+    return t.weekday() < 5 and US0 <= t.strftime("%H:%M") < US1
 def tw(ts): return datetime.fromtimestamp(ts, TZ)
 def same_hours(ts):
     t = tw(ts); m = t.hour * 60 + t.minute
