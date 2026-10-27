@@ -8,7 +8,7 @@
 1. `sim.py`：收盤後 `PROVISIONAL_AFTER`（預設 2）秒用 ws 盤口讀一次兩邊最佳賣價；一邊 ≤ `PROV_LOSER_ASK`（0.05）就是輸家（`provisional_winner`），立刻 `live.note_market(..., provisional=True)` 啟動或延長冷卻；正式結算照舊再呼叫一次。負值關閉。
 2. `live.py` `_settle_when_resolved`：重啟後補結算的輸單也呼叫 `note_market`。
 3. `live.py` `guard()` 多一個 `ask` 參數：`LIVE_ASK_FLOOR`（預設 0.80），規則決定的賣價低於它直接 skip（帳本記 skipped）。
-4. `sim.py` `BOOK_GAP_MAX`（程式預設 0＝關）：領先方賣價＋另一邊賣價 −1 超過門檻就不進場（`gap_block`，決策紀錄 reason=gap，看板文字「盤口不一致」）。**fish 10-27 20:1x 裁示開：「1.05 算異常」→ 主機 `btc5m_sim/.env` 加 `BOOK_GAP_MAX=0.05`（備份 `.env.bak-20261027-gap`），安全時刻重啟後生效，所有幣共用。**
+4. `sim.py` `BOOK_GAP_MAX`（程式預設 0＝關）：領先方賣價＋另一邊賣價 −1 超過門檻就不進場（`gap_block`，決策紀錄 reason=gap，看板文字「盤口不一致」）。**fish 10-27 20:1x 裁示開：「1.05 算異常」→ 主機 `btc5m_sim/.env` 加 `BOOK_GAP_MAX=0.05`（備份 `.env.bak-20261027-gap`），20:20:05 安全時刻重啟，四個程序環境都讀到 0.05（/proc 查過），所有幣共用。**
 
 ## 2. 為什麼
 
