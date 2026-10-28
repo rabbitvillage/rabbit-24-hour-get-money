@@ -34,3 +34,11 @@
 - .asset-acct2.env 加 `LIVE_ENV_FILE` 指向自己；`live setup` 產生 acct2 自己的 API 金鑰寫入該檔；主帳號 .live.env 未變。
 - `live balance`：14.946103（類型 3 查詢成功，金鑰可用）；`live dry-sign`：真實市場預演通過（5 股 @0.95，$4.75）。
 - 仍為 EXEC_MODE=off。開交易前需決定：最低餘額門檻（目前 $80，acct2 只有 $14.95）與 acct2 的股數／停損設定。
+
+## 追加 2026-10-29 00:33：acct2 開啟交易（fish 同意）
+- `.asset-acct2.env`：`EXEC_MODE=live`；acct2 專用風控 `MIN_BALANCE_USDC=5`、`MIN_BALANCE_WARN=8`、`LIVE_SIZE_MODE=fixed`、`LIVE_SHARES=5`、
+  `MAX_DAILY_LOSS_VARIANT=5`、`MAX_DAILY_LOSS_TOTAL=10`。其餘（規則 w60_m95_s20／w45_m95_s20、美股時段暫停、每盤 1 單、FAK）沿用共用 .env。
+- 修改前備份：主機 `.asset-acct2.env.bak-before-live-20261028`。
+- acct2 沒有 Telegram 通知（TG_TOKEN 空），要看結果需查 `journalctl -u btc5m-sim@acct2` 或 `data-acct2/live_orders.csv`。
+- 緊急停止：`touch /opt/rabbit-24-hour-get-money/btc5m_sim/data-acct2/STOP`（只停 acct2）；或 `EXEC_MODE=off` 後重啟 `btc5m-sim@acct2`。
+- 對交易影響：acct2 開始用真錢下單（每筆 5 股，約 $4.75–4.95）；主帳號與其他實例不受影響。第一筆類型 3 真單尚待驗證。
