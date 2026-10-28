@@ -562,3 +562,60 @@ class EventCalendarPause(unittest.TestCase):
         os.utime(self.f, None); self.assertEqual([l for s, e, l in live.load_events()], ["非農就業"])
         self.assertEqual(live.event_pause(self.at("2026-11-06T13:20")), "非農就業")       # 08:20 EST (DST over)
 
+
+
+class WalletTypes(unittest.TestCase):
+    """2026-10-28 acct2: deposit wallets (type 3) sign with maker = signer = wallet; type 1 (main account) unchanged."""
+    def test_type1_is_unchanged(self):
+        self.assertEqual(live.order_parties({"address": "0xE0A", "proxyWallet": "0xP1"}), ("0xP1", "0xE0A", 1))
+        self.assertEqual(live.order_parties({"address": "0xE0A", "proxyWallet": "0xP1", "walletType": 1}), ("0xP1", "0xE0A", 1))
+    def test_type3_uses_the_deposit_wallet_for_both(self):
+        self.assertEqual(live.order_parties({"address": "0xE0A", "proxyWallet": "0xDW", "walletType": 3}), ("0xDW", "0xDW", 3))
+    def test_other_types_are_refused(self):
+        with self.assertRaises(RuntimeError): live.order_parties({"address": "0xE0A", "proxyWallet": "0xS", "walletType": 2})
+
+    def test_type3_order_goes_out_as_type3(self):
+        d = tempfile.TemporaryDirectory(); live.DATA = d.name; live.KILL_FILE = os.path.join(d.name, "STOP")
+        live._orders.clear(); live._daily.clear(); live._stopped.clear()
+        saved = (live._get, live.identity, live.worker, live.clob_request, live.l2_headers, live.API_KEY, live.API_SECRET,
+                 live.API_PASSPHRASE, live.SIGNER_ADDRESS, live._notify, live._log)
+        try:
+            live.API_KEY = "k"; live.API_SECRET = base64.urlsafe_b64encode(b"s").decode(); live.API_PASSPHRASE = "p"; live.SIGNER_ADDRESS = "0xE0A"
+            live._notify = lambda *a: None; live._log = lambda *a: None
+            live._get = lambda url, **kw: {"minimum_tick_size": "0.001"}
+            live.identity = lambda: {"address": "0xE0A", "proxyWallet": "0xDW", "walletType": 3}
+            signed = {}
+            def fake_worker(op, payload=None, timeout=8):
+                signed["order"] = payload["order"]; return 200, {"ok": True, "signature": "0xsig", "digest": "0xd"}
+            live.worker = fake_worker; live.l2_headers = lambda m, p, b: {}
+            sent = {}
+            def fake_post(method, path, body=None, headers=None, _retry=True):
+                sent["body"] = json.loads(body); return 200, {"success": True, "status": "matched", "orderID": "o9", "makingAmount": "4.9", "takingAmount": "5"}
+            live.clob_request = fake_post
+            import time as _t; live._balance.update(usdc=1000.0, at=_t.time())
+            sizes = (live.LIVE_SHARES, live.MAX_SHARES); live.LIVE_SHARES, live.MAX_SHARES = 15.0, 15.0
+            try: row = live._submit("w45_p98_s10", market(), 1, 0.98, 30.0, mode="live")
+            finally: live.LIVE_SHARES, live.MAX_SHARES = sizes
+            self.assertEqual(row["status"], "filled", row["msg"])
+            self.assertEqual((signed["order"]["maker"], signed["order"]["signer"], signed["order"]["signatureType"]), ("0xDW", "0xDW", 3))
+            w = sent["body"]["order"]
+            self.assertEqual((w["maker"], w["signer"], w["signatureType"]), ("0xDW", "0xDW", 3))
+        finally:
+            (live._get, live.identity, live.worker, live.clob_request, live.l2_headers, live.API_KEY, live.API_SECRET,
+             live.API_PASSPHRASE, live.SIGNER_ADDRESS, live._notify, live._log) = saved
+            live._balance.update(usdc=None, at=0.0, alerted=None); d.cleanup()
+
+    def test_balance_query_uses_the_wallet_type(self):
+        saved = (live._get, live.identity, live.API_KEY, live.API_SECRET, live.API_PASSPHRASE, live.SIGNER_ADDRESS, live.l2_headers)
+        try:
+            live.API_KEY = "k"; live.API_SECRET = base64.urlsafe_b64encode(b"s").decode(); live.API_PASSPHRASE = "p"; live.SIGNER_ADDRESS = "0xE0A"
+            live.l2_headers = lambda m, p, b: {}
+            urls = []
+            live._get = lambda url, **kw: (urls.append(url), {"balance": "14946103"})[1]
+            live.identity = lambda: {"address": "0xE0A", "proxyWallet": "0xDW", "walletType": 3}
+            self.assertAlmostEqual(live.wallet_balance(force=True), 14.946103, 5); self.assertIn("signature_type=3", urls[-1])
+            live.identity = lambda: {"address": "0xE0A", "proxyWallet": "0xP1"}
+            live.wallet_balance(force=True); self.assertIn("signature_type=1", urls[-1])
+        finally:
+            (live._get, live.identity, live.API_KEY, live.API_SECRET, live.API_PASSPHRASE, live.SIGNER_ADDRESS, live.l2_headers) = saved
+            live._balance.update(usdc=None, at=0.0, alerted=None)

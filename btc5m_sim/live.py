@@ -221,7 +221,7 @@ GAMMA = "https://gamma-api.polymarket.com/events?slug=" + ASSET + "-updown-" + f
 ZERO32 = "0x" + "0" * 64
 UA = {"User-Agent": "btc5m-live"}
 LIVE_ENV = os.getenv("LIVE_ENV_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".live.env"))
-_ident = {}      # {"address": EOA, "proxyWallet": maker} from btc5m_whoami, fetched once
+_ident = {}      # {"address": EOA, "proxyWallet": maker, "walletType": 1|3} from btc5m_whoami, fetched once
 
 OFIELDS = ["ts", "mode", "variant", "slug", "outcome", "token_id", "ask", "price", "size", "tick", "neg_risk",
            "order_type", "status", "order_id", "filled_size", "cost", "secs_left", "msg"]
@@ -346,7 +346,7 @@ def wallet_balance(force=False, max_age=None):
     if not (API_KEY and API_SECRET and API_PASSPHRASE and SIGNER_ADDRESS): return None
     try:
         h = l2_headers("GET", "/balance-allowance", "")
-        d = _get(f"{CLOB}/balance-allowance?asset_type=COLLATERAL&signature_type=1", timeout=10, headers=h, proxied=True)
+        d = _get(f"{CLOB}/balance-allowance?asset_type=COLLATERAL&signature_type={_balance_sig_type()}", timeout=10, headers=h, proxied=True)
         usdc = int(d.get("balance", 0)) / 1e6
         _balance.update(usdc=usdc, at=now)
         return usdc
@@ -571,8 +571,25 @@ def identity():
     if not _ident:
         st, d = worker("btc5m_whoami")
         if st != 200 or not d.get("ok"): raise RuntimeError(f"whoami {st} {str(d)[:100]}")
-        _ident.update(address=d["address"], proxyWallet=d["proxyWallet"])
+        _ident.update(address=d["address"], proxyWallet=d["proxyWallet"], walletType=int(d.get("walletType", 1)))
     return _ident
+
+
+def order_parties(ident):
+    """(maker, signer, signatureType) for this account's wallet (2026-10-28, acct2).
+    Type 1 = legacy proxy wallet (main account): maker = proxy, signer = EOA.
+    Type 3 = deposit wallet (POLY_1271, accounts opened after 2026-05): maker = signer = the deposit wallet.
+    The Worker derives the wallet itself and refuses anything else; any other type is refused here too."""
+    wt = int(ident.get("walletType", 1))
+    if wt == 3: return ident["proxyWallet"], ident["proxyWallet"], 3
+    if wt == 1: return ident["proxyWallet"], ident["address"], 1
+    raise RuntimeError(f"unsupported wallet type {wt}")
+
+
+def _balance_sig_type():
+    """signature_type for /balance-allowance: the account's wallet type (1 when the Worker cannot be asked)."""
+    try: return int(identity().get("walletType", 1))
+    except Exception: return 1
 
 
 def l1_headers(timestamp, nonce=0):
@@ -798,8 +815,9 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, 
             return row
         ident = identity()
         neg_risk = bool(market.get("negRisk", False))
-        order = dict(salt=new_salt(), maker=ident["proxyWallet"], signer=ident["address"], tokenId=str(token),
-                     makerAmount=str(maker), takerAmount=str(taker), side=0, signatureType=1,
+        o_maker, o_signer, sig_type = order_parties(ident)
+        order = dict(salt=new_salt(), maker=o_maker, signer=o_signer, tokenId=str(token),
+                     makerAmount=str(maker), takerAmount=str(taker), side=0, signatureType=sig_type,
                      timestamp=str(int(time.time() * 1000)), metadata=ZERO32, builder=ZERO32, negRisk=neg_risk)
         # 1) the Worker re-validates (market, side, price, size, identity, daily cap) and signs; the key never leaves it
         tm["presign"] = time.time()
@@ -813,7 +831,7 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, 
             _notify(f"⚠️ [{ASSET.upper()}] 真單取消 {variant}\n{slug} 買 {outcome}：{moved}（剩 {secs_left}s）"); return row
         wire = dict(salt=order["salt"], maker=order["maker"], signer=order["signer"], tokenId=order["tokenId"],
                     makerAmount=order["makerAmount"], takerAmount=order["takerAmount"], side="BUY", expiration="0",
-                    signatureType=1, timestamp=order["timestamp"], metadata=ZERO32, builder=ZERO32, signature=signed["signature"])
+                    signatureType=sig_type, timestamp=order["timestamp"], metadata=ZERO32, builder=ZERO32, signature=signed["signature"])
         # 2) POST /order with L2 headers; the body string we sign is exactly the one we send
         body = json.dumps({"order": wire, "orderType": ORDER_TYPE, "owner": API_KEY})
         st, resp = clob_request("POST", "/order", body, l2_headers("POST", "/order", body))
@@ -924,7 +942,16 @@ if __name__ == "__main__":
         g = _get("https://polymarket.com/api/geoblock", timeout=12, proxied=True)
         print(json.dumps({"proxy": ORDER_PROXY or "(direct)", **g}))
     elif cmd == "setup":            # derive L2 credentials through the Worker and write .live.env (0600); prints nothing secret
-        key, sec, pw, addr = derive_l2(); write_live_env(key, sec, pw, addr)
+        key, sec, pw, addr = derive_l2()
+        # 2026-10-28: several accounts share this code. Never overwrite another account's credentials: if the target file
+        # already holds a different SIGNER_ADDRESS, stop (acct2 sets LIVE_ENV_FILE to its own .asset-acct2.env).
+        prev = ""
+        if os.path.exists(LIVE_ENV):
+            with open(LIVE_ENV) as f:
+                prev = next((l.split("=", 1)[1].strip() for l in f if l.startswith("SIGNER_ADDRESS=")), "")
+        if prev and prev.lower() != addr.lower():
+            raise SystemExit(f"refusing: {LIVE_ENV} belongs to {prev[:8]}…, this signer is {addr[:8]}… (set LIVE_ENV_FILE)")
+        write_live_env(key, sec, pw, addr)
         print(f"wrote {LIVE_ENV} (0600): signer address {addr}, api key {key[:8]}…")
     elif cmd == "dry-sign":         # ask the Worker to validate (not sign) a sample order for the current market
         start = int(time.time() // 300) * 300
@@ -933,8 +960,9 @@ if __name__ == "__main__":
         ev = evs[0]; m = ev["markets"][0]
         tokens = json.loads(m["clobTokenIds"]); ident = identity()
         maker, taker, shares, usdc = amounts(0.95, LIVE_SHARES)
-        order = dict(salt=new_salt(), maker=ident["proxyWallet"], signer=ident["address"], tokenId=str(tokens[0]), makerAmount=str(maker),
-                     takerAmount=str(taker), side=0, signatureType=1, timestamp=str(int(time.time() * 1000)), metadata=ZERO32, builder=ZERO32,
+        o_maker, o_signer, sig_type = order_parties(ident)
+        order = dict(salt=new_salt(), maker=o_maker, signer=o_signer, tokenId=str(tokens[0]), makerAmount=str(maker),
+                     takerAmount=str(taker), side=0, signatureType=sig_type, timestamp=str(int(time.time() * 1000)), metadata=ZERO32, builder=ZERO32,
                      negRisk=bool(m.get("negRisk", False)))
         print(json.dumps(worker("btc5m_order", {"order": order, "idempotencyKey": f"dry:{start}:{int(time.time())}", "dry": True})[1]))
     else:
