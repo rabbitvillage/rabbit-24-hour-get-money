@@ -28,3 +28,9 @@
 5. 影響檔案：`btc5m_sim/live.py`、`tests/test_btc5m_live.py`（新增 5 項）、本檔。
 6. 交易／風控影響：主帳號下單路徑不變；風控（最低餘額、每日停損、股數上限）程式未改。acct2 是否交易仍由 `EXEC_MODE` 決定，需 fish 確認才改。
    測試：test_btc5m_live 55 項、sim 38、feeds 9、review 7 全部通過。
+
+## 追加 2026-10-28 23:55：主機部署與驗證
+- racknerd 已 pull 到 d2c4794，只重啟 btc5m-sim@acct2；主實例與 btc15／eth／sol 未重啟（記憶體中仍是舊碼，下次重啟載入新碼，類型 1 路徑不變）。
+- .asset-acct2.env 加 `LIVE_ENV_FILE` 指向自己；`live setup` 產生 acct2 自己的 API 金鑰寫入該檔；主帳號 .live.env 未變。
+- `live balance`：14.946103（類型 3 查詢成功，金鑰可用）；`live dry-sign`：真實市場預演通過（5 股 @0.95，$4.75）。
+- 仍為 EXEC_MODE=off。開交易前需決定：最低餘額門檻（目前 $80，acct2 只有 $14.95）與 acct2 的股數／停損設定。
