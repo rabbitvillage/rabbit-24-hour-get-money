@@ -45,3 +45,47 @@ class Book(unittest.TestCase):
         self.assertFalse(f.changed.is_set())                     # nothing changed in the book -> the loop keeps waiting
         f.on_message(json.dumps({"event_type": "price_change", "asset_id": "111", "changes": [{"price": "0.97", "size": "3", "side": "SELL"}]}), now=3.0)
         self.assertTrue(f.changed.wait(timeout=0.01))
+
+
+class Chainlink(unittest.TestCase):
+    """Polymarket public stream, topic crypto_prices_chainlink (wire format recorded 2026-10-28)."""
+    def _upd(self, ts, v, sym="btc/usd"):
+        return json.dumps({"connection_id": "x", "payload": {"full_accuracy_value": "1", "symbol": sym, "timestamp": ts, "value": v},
+                           "timestamp": ts + 1100, "topic": "crypto_prices_chainlink", "type": "update"})
+
+    def test_snapshot_updates_and_window_mean(self):
+        f = feeds.ChainlinkFeed("btc/usd")
+        f.on_message(json.dumps({"payload": {"symbol": "btc/usd", "data": [{"timestamp": (1000 + i) * 1000, "value": 100.0 + i} for i in range(60)]},
+                                 "topic": "crypto_prices_chainlink", "type": "subscribe"}), now=1061.0)
+        self.assertAlmostEqual(f.window_mean(1000, 1060), 100.0 + 29.5)           # plain mean of 60 one-second prices
+        f.on_message(self._upd(1060000, 200.0), now=1061.5)
+        f.on_message(self._upd(1061000, 300.0, sym="sol/usd"), now=1062.0)        # other symbol ignored
+        f.on_message("", now=1062.0); f.on_message("PONG", now=1062.0)
+        self.assertEqual(f.latest(now=1062.0), (1060, 200.0, 0.5))
+        self.assertEqual(f.points(1059, 1061), {1059: 159.0, 1060: 200.0})
+
+    def test_subscribe_filter_is_compact_json(self):
+        # spaced JSON ('{"symbol": "btc/usd"}') gets a snapshot and then nothing (host test 2026-10-28)
+        sub = json.loads(feeds.ChainlinkFeed("SOL/USD").subscribe_msg())["subscriptions"][0]
+        self.assertEqual(sub, {"topic": "crypto_prices_chainlink", "type": "*", "filters": '{"symbol":"sol/usd"}'})
+
+    def test_missing_seconds_carry_forward_up_to_a_limit(self):
+        f = feeds.ChainlinkFeed("btc/usd")
+        for s in list(range(995, 1010)) + list(range(1012, 1060)):                 # 1010, 1011 missing
+            f.on_message(self._upd(s * 1000, 10.0 if s < 1012 else 20.0), now=s + 1.5)
+        self.assertAlmostEqual(f.window_mean(1000, 1060), (12 * 10.0 + 48 * 20.0) / 60)   # the 2 gaps carry 10.0
+        self.assertIsNone(f.window_mean(1000, 1060, max_missing=1))
+        self.assertIsNone(feeds.ChainlinkFeed("btc/usd").window_mean(1000, 1060))   # nothing buffered (process started late)
+
+    def test_basis_median_with_lead(self):
+        cl = {s: 105.0 for s in range(100, 140)}
+        cb = [(s - 0.4, 100.0) for s in range(100, 140)]                           # Coinbase $5 below, quoted 0.4 s before
+        self.assertAlmostEqual(feeds.basis(cl, cb), 5.0)
+        self.assertIsNone(feeds.basis(cl, cb[:10]))                                # too few pairs
+        self.assertIsNone(feeds.basis(cl, [(0.0, 100.0)]))                         # Coinbase quote too old to pair
+
+    def test_spot_history(self):
+        f = feeds.SpotFeed("BTC-USD")
+        for t, b in ((1.0, 10), (2.0, 11), (3.0, 12)):
+            f.on_ticker({"type": "ticker", "product_id": "BTC-USD", "best_bid": str(b), "best_ask": str(b)}, now=t)
+        self.assertEqual(f.history(2.0), [(2.0, 11.0), (3.0, 12.0)])

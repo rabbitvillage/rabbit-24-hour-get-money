@@ -106,6 +106,20 @@ CHOP_MAX_AMP_BPS = float(os.getenv("CHOP_MAX_AMP_BPS", "8"))
 # (w60/w45_m95_s20, BTC since 10-21, non-US): > 0.05 in 18 of 183 entries, 4 losses / 14 wins, blocked pnl negative.
 # 0 = off (default while the acceptance week's rules are frozen; fish decides).
 BOOK_GAP_MAX = float(os.getenv("BOOK_GAP_MAX", "0"))
+# The line distances are measured from (2026-10-28 structural fix, fish: 「這不是策略的一環，這是結構問題的修正」).
+# Markets settle on Chainlink's 60 s TWAP: priceToBeat = mean of the per-second Chainlink prices in [open-60, open). Before
+# this fix the line was the Polygon on-chain aggregator read at open (|p90| $19 off priceToBeat on BTC, ~ the whole $20
+# distance threshold) and spot was Coinbase, which sits ~$3 below Chainlink — two different scales in one subtraction.
+# Now: line = that exact 60 s mean from Polymarket's public Chainlink stream (feeds.ChainlinkFeed), moved onto Coinbase's
+# scale by the live Chainlink-Coinbase gap (median over the last BASIS_WINDOW s), so  dl = Coinbase now - (open - gap)
+# = (Coinbase now + gap) - open. Threshold, windows, price band are unchanged. Falls back to the old line when the stream
+# has no full open window (e.g. process started mid-market). LINE_TWAP=0 restores the old line.
+LINE_TWAP = os.getenv("LINE_TWAP", "1").strip().lower() in ("1", "true", "yes", "on")
+CL_SYMBOL = os.getenv("CL_SYMBOL", A["cb"].split("-")[0].lower() + "/usd")
+BASIS_WINDOW = int(os.getenv("BASIS_WINDOW", "120"))      # seconds of Chainlink/Coinbase pairs behind the gap estimate
+BASIS_EVERY = float(os.getenv("BASIS_EVERY", "5"))        # re-estimate the gap this often (seconds)
+BASIS_MAX_BPS = float(os.getenv("BASIS_MAX_BPS", "10"))   # a gap wider than this (bps of price) is a feed glitch: ignored
+_cl_feed = None                                           # feeds.ChainlinkFeed, started in main()
 # Provisional result from the closing book (2026-10-27 structural review): gamma marks a market closed a median 301 s after
 # the close (75% later than 240 s), so a loss cool-down started at resolution never covered the next market. PROVISIONAL_AFTER
 # seconds after the close the book is read once: a side whose best ask is <= PROV_LOSER_ASK has lost. Negative = off.
@@ -172,6 +186,9 @@ VFIELDS = ["slug", "start_utc", "price_to_beat", "variant", "window", "min_price
            "chain_at_start", "chain_ptb_err", "chain_at_entry", "chain_dist_at_entry", "chain_age_at_entry", "chain_samples",
            "winner", "won", "pnl", "note"]
 CFIELDS = ["slug", "secs_left", "price", "updated_at", "round_id"]  # sim_chain.csv: one row per on-chain feed update
+# sim_line.csv: one row per market — which line the distance filter used and how far each candidate sat from priceToBeat
+LFIELDS = ["slug", "start_utc", "price_to_beat", "line_src", "cl_open", "cl_open_err", "chain_at_start", "chain_open_err",
+           "spot_at_start", "gap_first", "gap_last", "line_official", "line_last"]
 # sim_decisions.csv: one row per market per rule — did it buy, and if not, why (shown on the dashboard)
 DFIELDS = ["slug", "start_utc", "variant", "decision", "reason", "ask", "secs_left", "dl", "threshold", "lead_min", "lead_max",
            "live_status", "live_msg", "winner", "won", "pnl"]
@@ -361,6 +378,52 @@ def sample_chain(end, csamples):
         time.sleep(max(0, 1.0 - (time.time() - t0)))
 
 
+class LineRef:
+    """Per-market line on Coinbase's scale (see LINE_TWAP). value() is cheap: the open is computed once, the gap every
+    BASIS_EVERY seconds. src says which line is in use: 'chainlink_twap' (+ '+gap' when the gap is applied) or 'fallback'."""
+    def __init__(self, start, fallback, cl=None, spot=None):
+        self.start, self.fallback, self.cl, self.spot = start, fallback, cl, spot
+        self.open = None; self.gap = None; self.gap_first = None; self._t = 0.0; self._gave_up = False
+
+    def _open(self, now):
+        if self.open is not None or self._gave_up or self.cl is None or now < self.start + 3:
+            return self.open
+        self.open = self.cl.window_mean(self.start - 60, self.start)
+        if self.open is None and now > self.start + 10:     # the open window is not in the buffer and will not arrive
+            self._gave_up = True
+        return self.open
+
+    def _gap(self, now):
+        if self.spot is None or now - self._t < BASIS_EVERY:
+            return self.gap
+        self._t = now
+        lo = int(now) - BASIS_WINDOW
+        g = feeds.basis(self.cl.points(lo, int(now) + 1), self.spot.history(lo - 5))
+        if g is not None and self.open and abs(g) / self.open * 1e4 <= BASIS_MAX_BPS:
+            self.gap = g
+            if self.gap_first is None: self.gap_first = g
+        return self.gap
+
+    def official(self, now=None):
+        """The official-open line on Coinbase's scale, or None — computed whether or not LINE_TWAP uses it (sim_line.csv)."""
+        now = now or time.time()
+        if self._open(now) is None:
+            return None
+        return self.open - (self._gap(now) or 0.0)
+
+    def value(self, now=None):
+        try:
+            o = self.official(now)
+        except Exception:                   # never let the new line break a poll: the old line is always there
+            o = None
+        return o if LINE_TWAP and o is not None else self.fallback
+
+    @property
+    def src(self):
+        if not LINE_TWAP or self.open is None: return "fallback"
+        return "chainlink_twap+gap" if self.gap is not None else "chainlink_twap"
+
+
 def latest(samples):
     return samples[-1][1] if samples else None
 
@@ -480,7 +543,8 @@ def watch(start, rows, vrows, lock):
     threading.Thread(target=sample_chain, args=(end, csamples), daemon=True).start()
     bf = None
     spot_at_start = spot()
-    chain_at_start, chain_up_at_start, _ = chainlink()   # the line, as the oracle saw it at open (closest free proxy for priceToBeat)  # proxy for priceToBeat (Chainlink at open), which gamma publishes only after close
+    chain_at_start, chain_up_at_start, _ = chainlink()   # the old line: on-chain aggregator at open (now the fallback, see LINE_TWAP)
+    line = LineRef(start, chain_at_start if chain_at_start is not None else spot_at_start, _cl_feed, _spot_feed)
     try:
         m = None
         while m is None and time.time() < end - LAST_ENTRY:
@@ -529,7 +593,7 @@ def watch(start, rows, vrows, lock):
                 now = time.time(); secs_left = round(end - now, 1); sp = latest(samples)
                 if sp is not None:
                     spot_min = sp if spot_min is None else min(spot_min, sp); spot_max = sp if spot_max is None else max(spot_max, sp)
-                ref = chain_at_start if chain_at_start is not None else spot_at_start
+                ref = line.value(now)
                 amp_now = amp_bps(spot_min, spot_max, ref)
                 lead = max((a[0] for a in asks if a[0] is not None), default=None)
                 if lead is not None and secs_left <= ENTRY_WINDOW:  # note range stays about the entry window
@@ -558,7 +622,7 @@ def watch(start, rows, vrows, lock):
                         # everything else (direction, distance, calm market) would have allowed a buy. Recorded once per rule
                         # with the side and price, so after settlement we know what letting it go cost or saved.
                         li = max(range(len(asks)), key=lambda i: asks[i][0] if asks[i][0] is not None else -1)
-                        ref_e = chain_at_start if chain_at_start is not None else spot_at_start
+                        ref_e = line.value(now)
                         dl_e = None if sp is None or ref_e is None else sp - ref_e
                         ok_dist = v["_filt"] is None or dist_ok(m["outcomes"][li], dl_e, v["_filt"])
                         if ok_dist and not chop_block((li, lead), amp_bps(spot_min, spot_max, ref_e), secs_left):
@@ -567,7 +631,7 @@ def watch(start, rows, vrows, lock):
                     if hit is None and lead is not None and v["min_price"] <= lead <= v["_max"]:
                         v["_depth_short"] = True         # price was in band but fewer than SHARES on the book
                     if hit and v["_filt"] is not None:
-                        ref = chain_at_start if chain_at_start is not None else spot_at_start
+                        ref = line.value(now)
                         dl = None if sp is None or ref is None else sp - ref
                         if not dist_ok(m["outcomes"][hit[0]], dl, v["_filt"]):
                             side_ok = dl is not None and ((dl > 0) if m["outcomes"][hit[0]] == "Up" else (dl < 0))
@@ -588,10 +652,10 @@ def watch(start, rows, vrows, lock):
                             v["chain_at_entry"] = csamples[-1][1]; v["chain_age_at_entry"] = round(now - csamples[-1][2])
                         del pending[name]
                 if now - last_feed >= BOOK_LOG_EVERY - 0.02:     # dashboard commentary (15 rule texts) only every 0.5 s: the pusher sends every 5 s anyway
-                    ref = chain_at_start if chain_at_start is not None else spot_at_start
+                    ref = line.value(now)
                     dl_now = None if sp is None or ref is None else round(sp - ref, 2)
                     live_set = live.LIVE_VARIANTS or {n for n, *_ in VARIANTS}
-                    feed.update(row["slug"], secs_left, asks, m["outcomes"], dl_now, "鏈上開盤價" if chain_at_start is not None else "Coinbase 開盤價",
+                    feed.update(row["slug"], secs_left, asks, m["outcomes"], dl_now, {"fallback": "鏈上開盤價" if chain_at_start is not None else "Coinbase 開盤價"}.get(line.src, "官方開盤價（Chainlink 60 秒平均）"),
                                 [(n, rule_state(v, asks, lead, secs_left, lambda: dl_now, m["outcomes"], lambda: amp_now), n in live_set) for n, v in vstate.items()])
                     last_feed = now
             except Exception as e:
@@ -669,7 +733,17 @@ def watch(start, rows, vrows, lock):
         for v in vstate.values():
             v["_t"] = row["_t"]; finalize_dists(v, samples, end, ptb, spot_at_start); finalize_chain(v, csamples, ptb, chain_at_start)
         decisions = [decision_row(v, row) for v in vstate.values()]
+        try:
+            lrow = dict(base, price_to_beat=ptb, line_src=line.src, cl_open=line.open, line_official=line.official(row["_t"]),
+                        chain_at_start=chain_at_start, spot_at_start=spot_at_start,
+                        cl_open_err=dist(line.open, ptb), chain_open_err=dist(chain_at_start, ptb),
+                        gap_first=None if line.gap_first is None else round(line.gap_first, 4),
+                        gap_last=None if line.gap is None else round(line.gap, 4), line_last=line.value(row["_t"]))
+        except Exception as e:              # the line log must never cost the trade/decision logs below
+            log(f"{row['slug']} line log failed {type(e).__name__}"); lrow = None
         with lock:
+            if lrow:
+                append_rows(os.path.join(DATA, "sim_line.csv"), LFIELDS, [lrow])
             rows.append(row); vrows.extend(vstate.values())
             append_rows(os.path.join(DATA, "sim_trades.csv"), FIELDS, [row])
             if decisions:
@@ -752,6 +826,14 @@ def main():
             _spot_feed = feeds.SpotFeed(A["cb"]); _spot_feed.start(); log(f"ws feeds on: spot {A['cb']} via Coinbase ws, order books via Polymarket ws, REST fallback after {WS_STALE:g}s")
         except Exception as e:
             log(f"ws spot feed unavailable ({type(e).__name__}); REST only"); _spot_feed = None
+    global _cl_feed
+    if USE_WS:   # always on: the official line is logged to sim_line.csv even when LINE_TWAP=0 keeps the old line for decisions
+        try:
+            _cl_feed = feeds.ChainlinkFeed(CL_SYMBOL); _cl_feed.start()
+        except Exception as e:
+            log(f"chainlink stream unavailable ({type(e).__name__})"); _cl_feed = None
+    log(f"line for the distance filter: {'Chainlink 60s TWAP open of ' + CL_SYMBOL + ' (public stream) minus the Coinbase gap over ' + str(BASIS_WINDOW) + 's, fallback on-chain open' if LINE_TWAP else 'on-chain aggregator at open (LINE_TWAP=0)'}"
+        f"; official line logged to sim_line.csv: {'yes' if _cl_feed is not None else 'no (no stream)'}")
     log(f"start [{ASSET.upper()}]: entry {MIN_PRICE}-{MAX_PRICE} in last {ENTRY_WINDOW}s, {SHARES:g} shares, poll {POLL}s"
         f"{f' (wake on book change, min gap {WAKE_MIN_GAP:g}s)' if WAKE_ON_CHANGE and USE_WS else ''}; dist scale {DIST_SCALE:.4g}; "
         f"variants {[n for n, _, _, _, _ in VARIANTS]}; book window {BOOK_WINDOW}s; spot window {SPOT_WINDOW}s")

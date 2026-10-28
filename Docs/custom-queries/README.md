@@ -114,3 +114,37 @@ data-api 每分鐘抓太多會回 429『請求太多』，腳本已經每頁停 
 - **怎麼跑**：`python3 -I /tmp/cq/fill_slip_hist.py data data-sol data-eth`
 - **怎麼看**：`0` 原價成交，`1` 貴 1 分，負數比看到的便宜。2026-10-26：125 筆，56% 原價、18% 貴 1 分、8% 貴 2 分、18% 便宜；0.97～0.99 的單 16% 貴 1 分。
 - **不能拿去下單的情況**：這是成本估計，不是訊號。
+
+## twap_vs_coinbase.py：Coinbase 會不會變成官方結算價（歷史逐場）
+
+- **用途**：官方結算規則是 Chainlink 的 60 秒 TWAP『時間加權平均價』：開盤價 = 開盤前 60 秒平均（= 上一場的 finalPrice），收盤價 = 最後 60 秒平均。用機器人記錄的 Coinbase 價格（sim_book.csv 最後 150 秒每 0.5～1 秒一筆）重算同一段的 Coinbase 平均，回答：(1) Coinbase 和官方差多少、穩不穩；(2) 只看 Coinbase 能不能猜中官方輸贏，和機器人現在的算法（Coinbase 即時價 − Polygon 鏈上喂價開盤價）比；(3) 剩 s 秒時用「已經過的平均＋現在價格補剩下的」預測，和當下盤口賣價比；(4) 兩條真單規則的影子進場，輸單在進場當下 TWAP 是否已經看得出來。
+- **參數**：資料夾（在 btc5m_sim/ 底下跑，預設 data）；`DIST_SCALE`（BTC 不用設，SOL 設 0.004，對應機器人的 $20 距離規則）；`RULES`（預設 `w60_m95_s20,w45_m95_s20`）。
+- **怎麼跑**：`cd /opt/rabbit-24-hour-get-money/btc5m_sim && python3 -I /tmp/cq/twap_vs_coinbase.py data`；SOL：`DIST_SCALE=0.004 python3 -I /tmp/cq/twap_vs_coinbase.py data-sol`
+- **怎麼看**：單位 bps＝價格的 0.01%（BTC 約 $8）。2026-10-28 跑（BTC 2,458 場、SOL 1,586 場）：
+  - Coinbase 平均比官方低一點：BTC 中位數 −0.41 bps（約 −$3.4），而且很穩：相鄰兩場的差距變化 |p50| 0.30、|p90| 0.80 bps。
+  - 機器人現在的開盤基準線（Polygon 鏈上喂價）和官方開盤價差 |p50| 0.58、|p90| 2.32 bps（BTC 約 $19，幾乎等於 $20 距離門檻）。
+  - 猜中官方輸贏（收盤時）：Coinbase 開收盤都用 60 秒平均 BTC 97.6%／SOL 98.2%；機器人的算法 91.1%／91.4%。差距最大的是勢均力敵的場次（官方漲跌 < $20）：剩 30 秒時 TWAP 算法 BTC 88.4%、機器人算法 79.0%。
+  - **但在機器人的價位帶（賣價 0.80～0.95）裡，市場已經把 TWAP 資訊算進價格**：按 TWAP 偏向分組，勝率減賣價大多在 ±0.03 內（雜訊）。剩 30 秒以內，大部分場次領先方賣價已經 ≥0.95，落在價位帶的場次很少。
+  - 真單規則影子 275 筆輸 22 筆，22 筆輸單在進場當下 TWAP 偏向全部是正的（+0.5～+4.3 bps，同一邊）：輸單是最後幾十秒行情真的反轉，不是來源不一致。
+- **不能拿去下單的情況**：第 3 段的切面每格常只有個位數到幾十筆；第 4 段只有 22 筆輸單；Coinbase 最後 5 秒沒有紀錄（用剩 5 秒的價格補）。這是「方向判斷準不準」的研究，不是進場訊號；策略凍結期間不改規則。
+
+## record_cl_cb.mjs ＋ cl_vs_cb_lag.py：即時錄 Chainlink 和 Coinbase，量誰先動、差幾秒
+
+- **用途**：同時錄 Polymarket 公開串流 `wss://ws-live-data.polymarket.com`（topic `crypto_prices_chainlink`，每秒一筆官方來源價格，不用登入；訂閱時會先送過去 60 秒）和 Coinbase ticker，然後算：送達延遲、同一時間兩邊差多少、誰先動（1 秒變化的相關係數對時間差掃描）、Chainlink 每秒價格的 60 秒平均是否等於 gamma 的 finalPrice。
+- **參數**：錄製：分鐘數、輸出檔；分析：檔案、幣種（btc 或 sol）。
+- **怎麼跑**：本機 `node record_cl_cb.mjs 40 feeds.jsonl`（Node 22 以上，內建 WebSocket）；主機 `cd /tmp/cq && nohup nice -n 10 python3 -I record_cl_cb.py 10 feeds_host.jsonl &`（用主機已有的 websocket-client，只讀、不碰機器人）。錄完過 5 分鐘（等 gamma 公布 finalPrice）再 `python3 -I cl_vs_cb_lag.py feeds.jsonl btc`。
+- **怎麼看**：2026-10-28 結果（本機 41 分鐘、主機 11 分鐘，BTC）：
+  - 誰先動：Chainlink 某一秒的價格最像 Coinbase **0.25～0.5 秒前**的價格（相關係數 0.64～0.66），兩者幾乎同步，Coinbase 沒有「幾秒後的官方價」。
+  - 送達延遲：Chainlink 經 Polymarket 到主機 p50 1.45 秒（Polymarket 自己在 1.09 秒才送出），Coinbase 到主機 0.03 秒。所以主機大約提早 **1.9 秒**知道 Chainlink 接下來會報多少（本機在越南是 1.6 秒）。
+  - 價差：Chainlink 比 Coinbase 高 p50 $2.4～4.5，逐秒差距的 sd 約 $4。
+  - finalPrice 驗證：Chainlink 每秒價格在收盤前 60 秒的平均，和官方 finalPrice 差 −$0.9～+$1.4（約 0.1 bps；官方可能用的是比每秒更細的報價）。Coinbase 同一段平均差 −$2.7～−$9.3。也就是說，**只要訂閱這個公開串流，就能自己算出幾乎準確的開盤基準線**，不用等 gamma 公布，也不用 Polygon 鏈上喂價（和官方差 |p90| 約 $19）。
+  - 每秒波動：Chainlink 1 秒變化 sd $2.49，所以從剩 s 秒到收盤，結算 TWAP 還能動的 sd ≈ (s/60)×2.49×√(s/3)：60 秒 $11、45 秒 $7、30 秒 $3.9、20 秒 $2.1、10 秒 $0.8。
+- **不能拿去下單的情況**：送達延遲和錄製地點有關。2026-10-28 本機在越南、主機在美東，兩邊數字不同，判斷機器人的情況要看主機那份。「誰先動」比的是各自的價格時間戳，和錄製地點無關。一次只錄幾十分鐘。
+
+## replay_line_fix.py：基準線修正（FR-20261028-official-line）會怎麼改變進場
+
+- **用途**：用 sim_book.csv 重放兩條真單規則（w60_m95_s20、w45_m95_s20），三條基準線各跑一次：舊的（開盤時的 Polygon 鏈上喂價）、官方開盤價但不扣價差、官方開盤價扣 Coinbase 價差（也就是修正後的做法；歷史上等於開盤窗口的 Coinbase 60 秒平均）。列出兩條線都進、只有舊線進、只有新線進、方向相反的場次，各自的勝率和扣手續費後每股淨利，並分 Up／Down。
+- **參數**：資料夾；環境變數 `DIST_SCALE`（SOL 0.004）、`SHARES`（5）、`CHOP_MAX_AMP_BPS`（8）、`BOOK_GAP_MAX`（0；設 0.05 看盤口一致性開啟後）、`RULES`。和 `twap_vs_coinbase.py` 放在同一個資料夾（會 import 它）。
+- **怎麼跑**：`cd /opt/rabbit-24-hour-get-money/btc5m_sim && python3 -I /tmp/cq/replay_line_fix.py data`
+- **怎麼看**：第一行的「和機器人影子帳一致率」要在 98% 以上，重放才可信。2026-10-28 跑（BTC 2,424 場）：w60 舊線 238 筆輸 6.3%、每股 +7.64，新線 192 筆輸 6.2%、+3.02；w45 舊 85 筆 +2.34，新 43 筆 +2.62。差別集中在 Down：舊線偏 Down 約 $3，放進比較多 Down 單，這段 BTC 下跌期間剛好賺錢。部署後改用 `sim_line.csv` 裡實際的官方基準線重跑，會比歷史推估準。
+- **不能拿去下單的情況**：只有幾十筆輸單，兩條線的差距大多來自 5 場方向相反的場次；這是「改了會差多少」的估計，不是「哪條線比較會賺」的證明。

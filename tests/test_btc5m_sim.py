@@ -311,3 +311,52 @@ class GapFilter(unittest.TestCase):
             sim.BOOK_GAP_MAX = 0
             self.assertIsNone(sim.gap_block((1, 0.84, 5053.0, 4244.0), asks, 36.6))                           # off by default
         finally: sim.BOOK_GAP_MAX = old
+
+
+class LineFix(unittest.TestCase):
+    """2026-10-28: the distance line = official open (Chainlink 60 s mean) moved onto Coinbase's scale."""
+    class _CL:
+        def __init__(self, open_px, pts=None): self.open_px, self.pts, self.calls = open_px, pts or {}, 0
+        def window_mean(self, lo, hi): self.calls += 1; return self.open_px
+        def points(self, lo, hi): return self.pts
+    class _Spot:
+        def __init__(self, hist): self.hist = hist
+        def history(self, since): return self.hist
+
+    def test_official_open_with_gap(self):
+        cl = self._CL(80000.0, {s: 80004.0 for s in range(900, 1000)})
+        spot = self._Spot([(s - 0.4, 80000.0) for s in range(900, 1000)])       # Coinbase $4 below Chainlink
+        ln = sim.LineRef(1000 - 60, fallback=79990.0, cl=cl, spot=spot)
+        self.assertEqual(ln.value(now=941.0), 79990.0)                         # too early: old line
+        self.assertEqual(ln.src, "fallback")
+        self.assertAlmostEqual(ln.value(now=1000.0), 80000.0 - 4.0)            # open on Coinbase's scale
+        self.assertEqual(ln.src, "chainlink_twap+gap")
+        ln.value(now=1001.0); self.assertEqual(cl.calls, 1)                    # open computed once
+        # a Coinbase quote of 80030 is +$30 over the official open in Chainlink terms ($34 raw minus the $4 gap)
+        self.assertAlmostEqual(80030.0 - ln.value(now=1001.0), 34.0)
+
+    def test_no_open_window_falls_back_and_gives_up(self):
+        cl = self._CL(None)
+        ln = sim.LineRef(1000, fallback=79990.0, cl=cl, spot=None)
+        self.assertEqual(ln.value(now=1004.0), 79990.0); self.assertEqual(ln.value(now=1011.0), 79990.0)
+        n = cl.calls; ln.value(now=1050.0); self.assertEqual(cl.calls, n)      # stops retrying once the window cannot arrive
+        self.assertEqual(sim.LineRef(1000, 5.0, cl=None).value(now=2000.0), 5.0)
+
+    def test_broken_stream_never_breaks_a_poll(self):
+        class Boom:
+            def window_mean(self, lo, hi): raise RuntimeError("feed bug")
+        self.assertEqual(sim.LineRef(1000, 79990.0, cl=Boom()).value(now=1005.0), 79990.0)
+
+    def test_glitchy_gap_ignored_and_switch_off(self):
+        cl = self._CL(80000.0, {s: 80200.0 for s in range(900, 1000)})          # $200 = 25 bps: a glitch, not a gap
+        ln = sim.LineRef(940, 79990.0, cl=cl, spot=self._Spot([(s - 0.4, 80000.0) for s in range(900, 1000)]))
+        self.assertEqual(ln.value(now=1000.0), 80000.0); self.assertEqual(ln.src, "chainlink_twap")
+        old = sim.LINE_TWAP
+        try:
+            sim.LINE_TWAP = False
+            ln = sim.LineRef(940, 79990.0, cl=cl)
+            self.assertEqual(ln.value(now=1000.0), 79990.0)                    # switch off: decisions keep the old line
+            self.assertEqual(ln.official(now=1000.0), 80000.0)                 # but the official line is still there to log
+            self.assertEqual(ln.src, "fallback")
+        finally:
+            sim.LINE_TWAP = old
