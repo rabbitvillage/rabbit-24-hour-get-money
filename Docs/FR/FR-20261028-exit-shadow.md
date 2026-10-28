@@ -1,6 +1,6 @@
 # FR-20261028-exit-shadow：影子離場訊號（只記錄、不賣）
 
-- 狀態：active（第一批 12:05:05 部署 30aea7c；第二批「真實買價路徑」12:30:05 部署 4d59778。**第二批有 bug**：迴圈裡用 `dist` 當區域變數，遮住了同名的模組函式，導致 12:30 起每場的 `sim_line.csv` 寫入失敗（journal `line log failed UnboundLocalError`），判斷與其他紀錄不受影響；已改名 `dist_now` 並加回歸測試（watch() 不得指派和模組函式同名的變數），116 個測試通過，待部署。12:30～修好之間的場次沒有 `sim_line.csv` 列）
+- 狀態：active（第一批 12:05:05 部署 30aea7c；第二批「真實買價路徑」12:30:05 部署 4d59778。**第二批有 bug**：迴圈裡用 `dist` 當區域變數，遮住了同名的模組函式，導致 12:30 起每場的 `sim_line.csv` 寫入失敗（journal `line log failed UnboundLocalError`），判斷與其他紀錄不受影響；已改名 `dist_now` 並加回歸測試（watch() 不得指派和模組函式同名的變數），116 個測試通過，**12:50:05 部署 40e272c、四服務 active，12:58 第一場結算後 `sim_line.csv` 恢復寫入（1793163000，重啟那場所以是 fallback），`line log failed` 0 次**。12:25～12:45 開盤的 6 場沒有 `sim_line.csv` 列）
 - 來源：fish 10-28：「加一個只記錄、不真的賣的離場訊號……累積到 11-02 再看」；「關鍵是速度」
 
 ## 1. 改了什麼
