@@ -360,3 +360,29 @@ class LineFix(unittest.TestCase):
             self.assertEqual(ln.src, "fallback")
         finally:
             sim.LINE_TWAP = old
+
+
+class ShadowExit(unittest.TestCase):
+    """2026-10-28: shadow exit signal — P(win) from the 60 s settlement average; logged only, never sells."""
+    def test_win_prob_known_part_and_room(self):
+        pts = {k: 80010.0 for k in range(940, 970)}                 # first 30 s of the window printed $10 above the open
+        p, lean, sd = sim.win_prob("Up", 80000.0, 1000, 970.0, pts, 80010.0, 0.3)
+        self.assertAlmostEqual(lean, 10 / 80000 * 1e4, 6); self.assertGreater(p, 0.9)
+        p2, _, _ = sim.win_prob("Down", 80000.0, 1000, 970.0, pts, 80010.0, 0.3)
+        self.assertAlmostEqual(p + p2, 1.0, 9)
+        # price fell $30 below for the rest: known +$10 x 30 s, rest -$30 x 30 s -> mean -$10: Up is in trouble
+        p3, lean3, _ = sim.win_prob("Up", 80000.0, 1000, 970.0, pts, 79970.0, 0.3)
+        self.assertLess(lean3, 0); self.assertLess(p3, 0.1)
+        # same lean with 5 s left is surer than with 30 s left
+        pa, _, _ = sim.win_prob("Up", 80000.0, 1000, 995.0, {}, 79999.0, 0.3)
+        pb, _, _ = sim.win_prob("Up", 80000.0, 1000, 970.0, {}, 79999.0, 0.3)
+        self.assertLess(pa, pb)
+
+    def test_sigma_and_exit_rows(self):
+        self.assertEqual(sim.cl_sigma_bps({1: 1.0}, 1.0), 0.3)
+        self.assertGreaterEqual(sim.cl_sigma_bps({k: 80000.0 for k in range(100)}, 80000.0), 0.15)
+        v = dict(slug="s", variant="w60_m95_s20", entered=1, side="Up", ask=0.85, secs_left=55.0, winner="Down", won=0,
+                 _exit_lag=dict(secs_left=30.0, p_win=0.25, lean_bps=-0.5, sd_bps=0.8, bid=0.55))
+        (r,) = sim.exit_rows([v, dict(slug="s", variant="x", entered=0)])
+        self.assertEqual(r["trigger"], "lag"); self.assertAlmostEqual(r["hold_pnl_sh"], -0.85 - sim.fee(0.85), 4)
+        self.assertAlmostEqual(r["exit_pnl_sh"], 0.55 - 0.85 - sim.fee(0.85) - sim.fee(0.55), 4)

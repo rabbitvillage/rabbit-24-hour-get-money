@@ -12,7 +12,7 @@ Output: data/sim_trades.csv  (main rule, schema unchanged)
 
 Run:  python3 -m btc5m_sim.sim            (env: see .env.example)
 """
-import csv, glob, json, os, sys, threading, time, urllib.request, urllib.parse
+import csv, math, glob, json, os, sys, threading, time, urllib.request, urllib.parse
 from datetime import datetime, timezone, timedelta
 
 from . import live   # phase-1 executor; EXEC_MODE=off keeps it inert
@@ -120,6 +120,15 @@ BASIS_WINDOW = int(os.getenv("BASIS_WINDOW", "120"))      # seconds of Chainlink
 BASIS_EVERY = float(os.getenv("BASIS_EVERY", "5"))        # re-estimate the gap this often (seconds)
 BASIS_MAX_BPS = float(os.getenv("BASIS_MAX_BPS", "10"))   # a gap wider than this (bps of price) is a feed glitch: ignored
 _cl_feed = None                                           # feeds.ChainlinkFeed, started in main()
+# Shadow exit signal (2026-10-28, fish: 「只記錄、不真的賣的離場訊號」). Never sells anything. After an entry, every poll in the
+# last 60 s: P(win) from the settlement rule itself — final = mean of the last 60 one-second Chainlink prices; the seconds
+# already printed are known, the rest is (Coinbase now + gap) plus noise sd (s/60)*sigma*sqrt(s/3). Logged to sim_exit.csv:
+# 'lag' = first moment P(win) < EXIT_P while our bid (1 - other side's ask) is still >= EXIT_MIN_BID (the market has not
+# caught up — the one rule that was positive in Docs/custom-queries/exit_on_reversal.py); 'p10' = first P(win) < 0.10.
+EXIT_SHADOW = os.getenv("EXIT_SHADOW", "1").strip().lower() in ("1", "true", "yes", "on")
+EXIT_P = float(os.getenv("EXIT_P", "0.3"))
+EXIT_MIN_BID = float(os.getenv("EXIT_MIN_BID", "0.5"))
+EXIT_BASIS_SD = float(os.getenv("EXIT_BASIS_SD", "0.45"))   # bps: error left in "Coinbase + gap" as a Chainlink estimate
 # Provisional result from the closing book (2026-10-27 structural review): gamma marks a market closed a median 301 s after
 # the close (75% later than 240 s), so a loss cool-down started at resolution never covered the next market. PROVISIONAL_AFTER
 # seconds after the close the book is read once: a side whose best ask is <= PROV_LOSER_ASK has lost. Negative = off.
@@ -187,6 +196,10 @@ VFIELDS = ["slug", "start_utc", "price_to_beat", "variant", "window", "min_price
            "winner", "won", "pnl", "note"]
 CFIELDS = ["slug", "secs_left", "price", "updated_at", "round_id"]  # sim_chain.csv: one row per on-chain feed update
 # sim_line.csv: one row per market — which line the distance filter used and how far each candidate sat from priceToBeat
+# sim_exit.csv: shadow exit signals (no order is ever sent) — one row per entered rule per trigger
+EFIELDS = ["slug", "variant", "trigger", "side", "entry_ask", "entry_secs", "secs_left", "p_win", "lean_bps", "sd_bps", "bid",
+           "bid_05s", "bid_1s", "bid_2s",
+           "winner", "won", "hold_pnl_sh", "exit_pnl_sh"]
 LFIELDS = ["slug", "start_utc", "price_to_beat", "line_src", "cl_open", "cl_open_err", "chain_at_start", "chain_open_err",
            "spot_at_start", "gap_first", "gap_last", "line_official", "line_last"]
 # sim_decisions.csv: one row per market per rule — did it buy, and if not, why (shown on the dashboard)
@@ -424,6 +437,28 @@ class LineRef:
         return "chainlink_twap+gap" if self.gap is not None else "chainlink_twap"
 
 
+def cl_sigma_bps(points, ref):
+    """Per-second volatility (bps) from {second: price}; 0.15 bps floor, 0.3 when there is too little data."""
+    ks = sorted(points); d = [points[b] - points[a] for a, b in zip(ks, ks[1:]) if b - a == 1]
+    if len(d) < 20 or not ref:
+        return 0.3
+    m = sum(d) / len(d)
+    return max(0.15, (sum((x - m) ** 2 for x in d) / len(d)) ** 0.5 / ref * 1e4)
+
+
+def win_prob(side, open_px, end, now, cl_points, est_now, sigma, basis_sd=None):
+    """P(the side wins) under the settlement rule: final = mean of the 60 one-second Chainlink prices in [end-60, end).
+    Seconds before `now` use the printed Chainlink price when there is one, else est_now (Coinbase now + gap, Chainlink scale);
+    the rest is est_now plus noise. Returns (p, lean_bps, sd_bps)."""
+    basis_sd = EXIT_BASIS_SD if basis_sd is None else basis_sd
+    s = max(0.0, end - now)
+    known = [cl_points.get(k, est_now) for k in range(end - 60, min(end, int(now)))]
+    est = (sum(known) + est_now * (60 - len(known))) / 60
+    lean = (1 if side == "Up" else -1) * (est - open_px) / open_px * 1e4
+    sd = (((s / 60) * sigma * (s / 3) ** 0.5) ** 2 + basis_sd ** 2) ** 0.5
+    return 0.5 * (1 + math.erf(lean / sd / 2 ** 0.5)), lean, sd
+
+
 def latest(samples):
     return samples[-1][1] if samples else None
 
@@ -651,6 +686,34 @@ def watch(start, rows, vrows, lock):
                         if csamples:
                             v["chain_at_entry"] = csamples[-1][1]; v["chain_age_at_entry"] = round(now - csamples[-1][2])
                         del pending[name]
+                if EXIT_SHADOW and secs_left <= 60 and line.open and sp is not None and _cl_feed is not None:
+                    try:
+                        held = [v for v in vstate.values() if v.get("entered")]
+                        for v in held:                       # follow-up bids: how much speed is worth after a trigger
+                            for key in ("_exit_lag", "_exit_p10"):
+                                r = v.get(key)
+                                if not r: continue
+                                oth = asks[1 - m["outcomes"].index(v["side"])][0]
+                                for lag, f in ((0.5, "bid_05s"), (1.0, "bid_1s"), (2.0, "bid_2s")):
+                                    if f not in r and now - r["_t"] >= lag:
+                                        r[f] = None if oth is None else round(1 - oth, 3)
+                        held = [v for v in held if not (v.get("_exit_lag") and v.get("_exit_p10"))]
+                        if held:
+                            pts = _cl_feed.points(int(now) - 120, int(now) + 1)
+                            est_now = sp + (line.gap or 0.0); sig = cl_sigma_bps(pts, line.open)
+                            for v in held:
+                                pw, lean, sd = win_prob(v["side"], line.open, end, now, pts, est_now, sig)
+                                oth = asks[1 - m["outcomes"].index(v["side"])][0]
+                                bid = None if oth is None else round(1 - oth, 3)
+                                rec = dict(secs_left=secs_left, p_win=round(pw, 4), lean_bps=round(lean, 2), sd_bps=round(sd, 2), bid=bid, _t=now)
+                                if not v.get("_exit_lag") and pw < EXIT_P and bid is not None and bid >= EXIT_MIN_BID:
+                                    v["_exit_lag"] = rec
+                                    log(f"{row['slug']} shadow exit (no order) {v['variant']} {v['side']} P(win) {pw:.2f} bid {bid} {secs_left}s left")
+                                if not v.get("_exit_p10") and pw < 0.10:
+                                    v["_exit_p10"] = rec
+                    except Exception as e:
+                        if not row.get("_exit_err"):
+                            row["_exit_err"] = 1; log(f"{row['slug']} shadow exit check failed {type(e).__name__}")
                 if now - last_feed >= BOOK_LOG_EVERY - 0.02:     # dashboard commentary (15 rule texts) only every 0.5 s: the pusher sends every 5 s anyway
                     ref = line.value(now)
                     dl_now = None if sp is None or ref is None else round(sp - ref, 2)
@@ -744,6 +807,9 @@ def watch(start, rows, vrows, lock):
         with lock:
             if lrow:
                 append_rows(os.path.join(DATA, "sim_line.csv"), LFIELDS, [lrow])
+            erows = exit_rows(vstate.values())
+            if erows:
+                append_rows(os.path.join(DATA, "sim_exit.csv"), EFIELDS, erows)
             rows.append(row); vrows.extend(vstate.values())
             append_rows(os.path.join(DATA, "sim_trades.csv"), FIELDS, [row])
             if decisions:
@@ -765,6 +831,23 @@ def watch(start, rows, vrows, lock):
             log(f"{row['slug']} variants " + " ".join(
                 f"{n}={'@'+str(v['ask'])+'/'+str(v['secs_left'])+'s' if v['entered'] else '-'}" for n, v in vstate.items())
                 + f" | min|spot-ptb| {vstate[next(iter(vstate))]['min_abs_dist']} ({len(samples)} samples) | chain open-ptb {vstate[next(iter(vstate))]['chain_ptb_err']} ({len(csamples)} updates)")
+
+
+def exit_rows(variants):
+    """sim_exit.csv rows for the shadow exit signals of one market (after settlement, so the outcome is known)."""
+    out = []
+    for v in variants:
+        for trig, key in (("lag", "_exit_lag"), ("p10", "_exit_p10")):
+            r = v.get(key)
+            if not r or not v.get("entered"):
+                continue
+            ask = v["ask"]; won = v.get("won")
+            hold = None if won not in (0, 1) else round((1.0 if won else 0.0) - ask - fee(ask), 4)
+            ex = None if r["bid"] is None else round(r["bid"] - ask - fee(ask) - fee(r["bid"]), 4)
+            out.append(dict(slug=v["slug"], variant=v["variant"], trigger=trig, side=v["side"], entry_ask=ask, entry_secs=v["secs_left"],
+                            winner=v.get("winner"), won=won, hold_pnl_sh=hold, exit_pnl_sh=ex,
+                            **{k: x for k, x in r.items() if not k.startswith("_")}))
+    return out
 
 
 # ---------------- summaries ----------------
