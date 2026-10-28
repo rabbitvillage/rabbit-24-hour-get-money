@@ -398,3 +398,12 @@ class ShadowExit(unittest.TestCase):
         (r,) = sim.exit_path_rows([v, dict(slug="s", variant="x", entered=0)])
         self.assertEqual((r["entry_ask"], r["secs_left"], r["bid"], r["bid_src"], r["won"]), (0.85, 54.5, 0.84, "book", 1))
         self.assertEqual(set(r) - set(sim.PFIELDS), set())
+
+
+class NoShadowedHelpers(unittest.TestCase):
+    def test_watch_does_not_shadow_module_functions(self):
+        # 2026-10-28 12:30 deploy: a local `dist = ...` in watch() shadowed the module function dist(), so the per-market
+        # line log (sim_line.csv) failed with UnboundLocalError on every market until the next deploy.
+        locals_ = set(sim.watch.__code__.co_varnames)
+        for name in ("dist", "fee", "best_ask", "best_bid", "evaluate", "fill", "score", "win_prob", "log", "market", "latest"):
+            self.assertNotIn(name, locals_, f"watch() assigns a local named {name!r}, hiding the module function")

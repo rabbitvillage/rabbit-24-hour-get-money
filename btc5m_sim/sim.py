@@ -717,9 +717,9 @@ def watch(start, rows, vrows, lock):
                                 src = "book" if bid is not None else "mirror"
                                 if bid is None: bid = mirror
                                 pw, lean, sd = win_prob(v["side"], line.open, end, now, pts, est_now, sig)
-                                dist = None if ref_x is None else round(sgn * (sp - ref_x), 2)
+                                dist_now = None if ref_x is None else round(sgn * (sp - ref_x), 2)   # not `dist`: that is the module function used below
                                 v.setdefault("_exit_path", []).append(dict(
-                                    secs_left=secs_left, bid=bid, bid_sh=bsh, bid_src=src, ask=asks[i][0], other_ask=oth, spot=sp, dist=dist,
+                                    secs_left=secs_left, bid=bid, bid_sh=bsh, bid_src=src, ask=asks[i][0], other_ask=oth, spot=sp, dist=dist_now,
                                     p_win=round(pw, 4), lean_bps=round(lean, 2), sd_bps=round(sd, 2)))
                                 for key in ("_exit_lag", "_exit_p10"):     # follow-up bids: how much speed is worth after a trigger
                                     r = v.get(key)
