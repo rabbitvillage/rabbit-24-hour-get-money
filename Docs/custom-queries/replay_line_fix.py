@@ -21,6 +21,7 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from twap_vs_coinbase import load, start_of, twap_est   # same loaders and Coinbase TWAP as the investigation
 
+FLOOR = float(os.getenv("FLOOR", "0.80"))
 SHARES = float(os.getenv("SHARES", "5")); CHOP = float(os.getenv("CHOP_MAX_AMP_BPS", "8")); GAP = float(os.getenv("BOOK_GAP_MAX", "0"))
 THR = 20 * float(os.getenv("DIST_SCALE", "1")); FEE = 0.07
 RULES = {"w60_m95_s20": 60, "w45_m95_s20": 45}
@@ -51,7 +52,7 @@ def replay(rows, ref, window):
             continue
         hit = None
         for side, ask, sh in (("Up", ua, ush), ("Down", da, dsh)):
-            if ask is not None and 0.80 <= ask <= 0.95 and (sh or 0) >= SHARES:
+            if ask is not None and FLOOR <= ask <= 0.95 and (sh or 0) >= SHARES:
                 hit = (side, ask); break
         if not hit or sp is None or ref is None:
             continue
