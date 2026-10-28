@@ -11,6 +11,8 @@
 
 開關 `EXIT_SHADOW`（預設開），門檻 `EXIT_P`（0.3）、`EXIT_MIN_BID`（0.5）。出現 `lag` 訊號時，journal 會記一行 `shadow exit (no order)`。
 
+**第二批（10-28 下午，fish：「把進場後每一輪的真實買價、距離、剩餘秒數記下來，11-02 驗尾盤才賣的規則」）**：新增 `sim_exit_path.csv`，真單規則（`LIVE_VARIANTS`）每一筆進場，從進場到收盤每一輪判斷記一列：`bid`／`bid_sh` 是我方那一邊盤口上**真實的最高買價和數量**（現在賣會拿到的價格，`bid_src=book`；盤口沒有買單時退回對面賣價反推，`bid_src=mirror`）、`ask`、`other_ask`、`spot`、`dist`（幣價離基準線多遠，正數＝對我方有利）、`p_win`、`lean_bps`、`sd_bps`，結算後補 `winner`／`won`。`sim_exit.csv` 的 `bid` 也改用真實買價，多一欄 `bid_src`。每場每條規則最多約 600 列，一天約 1～2 MB。
+
 ## 2. 為什麼
 歷史研究（`Docs/custom-queries/exit_on_reversal.py`）：一般停損都比抱到結算差。只有「模型說輸、賣價還 ≥0.5」這一種是正的，但只有 12 次、4 筆輸單。歷史資料只能用 Coinbase 推估官方價格，盤口每 0.5 秒才一筆，速度的價值可能被低估。所以改用官方即時資料，照實際判斷速度記錄。
 
