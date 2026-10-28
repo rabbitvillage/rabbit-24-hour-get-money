@@ -1,6 +1,6 @@
 # FR-20261028-exit-shadow：影子離場訊號（只記錄、不賣）
 
-- 狀態：active（本機完成，114 個測試通過，主機 Python 3.12 也全過；尚未部署）
+- 狀態：active（第一批 10-28 12:05:05 部署於主機 30aea7c、四服務 active；第二批「真實買價路徑」本機完成、115 個測試通過，待部署）
 - 來源：fish 10-28：「加一個只記錄、不真的賣的離場訊號……累積到 11-02 再看」；「關鍵是速度」
 
 ## 1. 改了什麼
@@ -21,10 +21,10 @@
 交易行為完全不變，仍然抱到結算。只是多寫一個紀錄檔，journal 多一行訊息。
 
 ## 5. 影響檔案
-`btc5m_sim/sim.py`（`EXIT_*` 設定、`cl_sigma_bps`、`win_prob`、`exit_rows`、迴圈內的檢查、`sim_exit.csv`），`tests/test_btc5m_sim.py`（ShadowExit ×2）。
+`btc5m_sim/sim.py`（`EXIT_*` 設定、`cl_sigma_bps`、`win_prob`、`best_bid`、`exit_rows`、`exit_path_rows`、迴圈內的檢查、`sim_exit.csv`、`sim_exit_path.csv`），`tests/test_btc5m_sim.py`（ShadowExit ×3）。
 
 ## 6. 對交易、下單、風控、資料判斷的影響
 **不送任何單、不改任何決策**。檢查包在 try 裡面，出錯只記一次 log，不會影響當輪判斷。每輪多一點計算（最多 120 個價格點），成本可忽略。
 
 ## 7. 驗證與驗收邊界
-部署後，在出現第一筆進場而且行情反轉的場次，`sim_exit.csv` 應該有列。11-02 用它算：`lag` 訊號觸發時賣，跟抱到結算比，扣手續費後是不是正的；`bid_05s／1s／2s` 和 `bid` 差多少，就是速度的價值。
+部署後，第一筆真單規則進場的場次結算後，`sim_exit_path.csv` 應有幾百列，`bid_src` 多數是 `book`。11-02 用 `sim_exit_path.csv` 重跑 `Docs/custom-queries/stop_profile.py` 的各條規則（真實買價、0.25 秒粒度），特別是「穿線且剩 ≤15～20 秒」和「剩 ≤10 秒且買價 ≤0.70」。另外用 `sim_exit.csv` 算：`lag` 訊號觸發時賣，跟抱到結算比，扣手續費後是不是正的；`bid_05s／1s／2s` 和 `bid` 差多少，就是速度的價值。

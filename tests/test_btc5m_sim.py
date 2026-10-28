@@ -386,3 +386,15 @@ class ShadowExit(unittest.TestCase):
         (r,) = sim.exit_rows([v, dict(slug="s", variant="x", entered=0)])
         self.assertEqual(r["trigger"], "lag"); self.assertAlmostEqual(r["hold_pnl_sh"], -0.85 - sim.fee(0.85), 4)
         self.assertAlmostEqual(r["exit_pnl_sh"], 0.55 - 0.85 - sim.fee(0.85) - sim.fee(0.55), 4)
+
+    def test_best_bid_and_path_rows(self):
+        ws_book = {"asks": [{"price": "0.90", "size": 10.0}], "bids": [{"price": "0.88", "size": 40.0}, {"price": "0.85", "size": 7.0}, {"price": "0.88", "size": 5.0}]}
+        self.assertEqual(sim.best_bid(ws_book), (0.88, 45.0))
+        self.assertEqual(sim.best_bid({"bids": [{"price": "0.5", "size": "0"}]}), (None, 0.0))
+        self.assertEqual(sim.best_bid(None), (None, 0.0))
+        v = dict(slug="s", variant="w60_m95_s20", entered=1, side="Up", ask=0.85, secs_left=55.0, winner="Up", won=1,
+                 _exit_path=[dict(secs_left=54.5, bid=0.84, bid_sh=30.0, bid_src="book", ask=0.86, other_ask=0.15, spot=80010.0, dist=12.5,
+                                  p_win=0.93, lean_bps=1.5, sd_bps=0.9)])
+        (r,) = sim.exit_path_rows([v, dict(slug="s", variant="x", entered=0)])
+        self.assertEqual((r["entry_ask"], r["secs_left"], r["bid"], r["bid_src"], r["won"]), (0.85, 54.5, 0.84, "book", 1))
+        self.assertEqual(set(r) - set(sim.PFIELDS), set())

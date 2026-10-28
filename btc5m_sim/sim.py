@@ -197,9 +197,14 @@ VFIELDS = ["slug", "start_utc", "price_to_beat", "variant", "window", "min_price
 CFIELDS = ["slug", "secs_left", "price", "updated_at", "round_id"]  # sim_chain.csv: one row per on-chain feed update
 # sim_line.csv: one row per market — which line the distance filter used and how far each candidate sat from priceToBeat
 # sim_exit.csv: shadow exit signals (no order is ever sent) — one row per entered rule per trigger
-EFIELDS = ["slug", "variant", "trigger", "side", "entry_ask", "entry_secs", "secs_left", "p_win", "lean_bps", "sd_bps", "bid",
+EFIELDS = ["slug", "variant", "trigger", "side", "entry_ask", "entry_secs", "secs_left", "p_win", "lean_bps", "sd_bps", "bid", "bid_src",
            "bid_05s", "bid_1s", "bid_2s",
            "winner", "won", "hold_pnl_sh", "exit_pnl_sh"]
+# sim_exit_path.csv (2026-10-28, fish: 「把進場後每一輪的真實買價、距離、剩餘秒數記下來」): one row per poll per entered live-listed
+# rule from the entry to the close — our side's REAL best bid from the order book (what a sell would get now), the mirror
+# bid (1 - other side's ask, what the replays assumed), the distance from the line signed toward our side, and P(win).
+PFIELDS = ["slug", "variant", "side", "entry_ask", "entry_secs", "secs_left", "bid", "bid_sh", "bid_src", "ask", "other_ask",
+           "spot", "dist", "p_win", "lean_bps", "sd_bps", "winner", "won"]
 LFIELDS = ["slug", "start_utc", "price_to_beat", "line_src", "cl_open", "cl_open_err", "chain_at_start", "chain_open_err",
            "spot_at_start", "gap_first", "gap_last", "line_official", "line_last"]
 # sim_decisions.csv: one row per market per rule — did it buy, and if not, why (shown on the dashboard)
@@ -286,6 +291,18 @@ def best_ask(book, max_price):
     sh = sum(s for p, s in asks if p <= max_price + 1e-9)
     usd = sum(p * s for p, s in asks if p <= max_price + 1e-9)
     return asks[0][0], sh, usd
+
+
+def best_bid(book):
+    """(best bid price, shares at that price) of a CLOB/ws book, or (None, 0.0). Our real exit price if we sold now."""
+    try:
+        bids = [(float(b["price"]), float(b["size"])) for b in (book or {}).get("bids", []) if float(b["size"]) > 0]
+    except (KeyError, TypeError, ValueError):
+        return None, 0.0
+    if not bids:
+        return None, 0.0
+    top = max(q for q, _ in bids)
+    return top, round(sum(sz for q, sz in bids if q == top), 2)
 
 
 def fee(p):
@@ -688,24 +705,29 @@ def watch(start, rows, vrows, lock):
                         del pending[name]
                 if EXIT_SHADOW and secs_left <= 60 and line.open and sp is not None and _cl_feed is not None:
                     try:
-                        held = [v for v in vstate.values() if v.get("entered")]
-                        for v in held:                       # follow-up bids: how much speed is worth after a trigger
-                            for key in ("_exit_lag", "_exit_p10"):
-                                r = v.get(key)
-                                if not r: continue
-                                oth = asks[1 - m["outcomes"].index(v["side"])][0]
-                                for lag, f in ((0.5, "bid_05s"), (1.0, "bid_1s"), (2.0, "bid_2s")):
-                                    if f not in r and now - r["_t"] >= lag:
-                                        r[f] = None if oth is None else round(1 - oth, 3)
-                        held = [v for v in held if not (v.get("_exit_lag") and v.get("_exit_p10"))]
+                        live_x = live.LIVE_VARIANTS or {n for n, *_ in VARIANTS}
+                        held = [v for v in vstate.values() if v.get("entered") and v["variant"] in live_x]
                         if held:
                             pts = _cl_feed.points(int(now) - 120, int(now) + 1)
-                            est_now = sp + (line.gap or 0.0); sig = cl_sigma_bps(pts, line.open)
+                            est_now = sp + (line.gap or 0.0); sig = cl_sigma_bps(pts, line.open); ref_x = line.value(now)
                             for v in held:
+                                i = m["outcomes"].index(v["side"]); sgn = 1 if v["side"] == "Up" else -1
+                                bid, bsh = best_bid(books[i]); oth = asks[1 - i][0]
+                                mirror = None if oth is None else round(1 - oth, 3)
+                                src = "book" if bid is not None else "mirror"
+                                if bid is None: bid = mirror
                                 pw, lean, sd = win_prob(v["side"], line.open, end, now, pts, est_now, sig)
-                                oth = asks[1 - m["outcomes"].index(v["side"])][0]
-                                bid = None if oth is None else round(1 - oth, 3)
-                                rec = dict(secs_left=secs_left, p_win=round(pw, 4), lean_bps=round(lean, 2), sd_bps=round(sd, 2), bid=bid, _t=now)
+                                dist = None if ref_x is None else round(sgn * (sp - ref_x), 2)
+                                v.setdefault("_exit_path", []).append(dict(
+                                    secs_left=secs_left, bid=bid, bid_sh=bsh, bid_src=src, ask=asks[i][0], other_ask=oth, spot=sp, dist=dist,
+                                    p_win=round(pw, 4), lean_bps=round(lean, 2), sd_bps=round(sd, 2)))
+                                for key in ("_exit_lag", "_exit_p10"):     # follow-up bids: how much speed is worth after a trigger
+                                    r = v.get(key)
+                                    if not r: continue
+                                    for lag, f in ((0.5, "bid_05s"), (1.0, "bid_1s"), (2.0, "bid_2s")):
+                                        if f not in r and now - r["_t"] >= lag:
+                                            r[f] = bid
+                                rec = dict(secs_left=secs_left, p_win=round(pw, 4), lean_bps=round(lean, 2), sd_bps=round(sd, 2), bid=bid, bid_src=src, _t=now)
                                 if not v.get("_exit_lag") and pw < EXIT_P and bid is not None and bid >= EXIT_MIN_BID:
                                     v["_exit_lag"] = rec
                                     log(f"{row['slug']} shadow exit (no order) {v['variant']} {v['side']} P(win) {pw:.2f} bid {bid} {secs_left}s left")
@@ -810,6 +832,9 @@ def watch(start, rows, vrows, lock):
             erows = exit_rows(vstate.values())
             if erows:
                 append_rows(os.path.join(DATA, "sim_exit.csv"), EFIELDS, erows)
+            prows = exit_path_rows(vstate.values())
+            if prows:
+                append_rows(os.path.join(DATA, "sim_exit_path.csv"), PFIELDS, prows)
             rows.append(row); vrows.extend(vstate.values())
             append_rows(os.path.join(DATA, "sim_trades.csv"), FIELDS, [row])
             if decisions:
@@ -847,6 +872,16 @@ def exit_rows(variants):
             out.append(dict(slug=v["slug"], variant=v["variant"], trigger=trig, side=v["side"], entry_ask=ask, entry_secs=v["secs_left"],
                             winner=v.get("winner"), won=won, hold_pnl_sh=hold, exit_pnl_sh=ex,
                             **{k: x for k, x in r.items() if not k.startswith("_")}))
+    return out
+
+
+def exit_path_rows(variants):
+    """sim_exit_path.csv rows: every recorded poll after an entry, with the settled outcome attached."""
+    out = []
+    for v in variants:
+        for r in v.get("_exit_path") or []:
+            out.append(dict(slug=v["slug"], variant=v["variant"], side=v["side"], entry_ask=v["ask"], entry_secs=v["secs_left"],
+                            winner=v.get("winner"), won=v.get("won"), **r))
     return out
 
 
