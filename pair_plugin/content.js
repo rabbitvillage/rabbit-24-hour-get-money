@@ -1,46 +1,59 @@
-// 開盤配對助手：在 Polymarket 5 分鐘盤頁面上顯示提示面板，並在不符合規則時擋下「買入」按鈕。
-// 不會自己下單：所有買入都由人按，插件只負責看盤、提醒、擋違規、記帳。
+// 開盤配對助手（人工模式）：在 Polymarket 5 分鐘盤頁面顯示提示面板、擋違規買入、一鍵下單、每場記錄。
+// 插件只在人按鍵或點按鈕時才動作，不會自己下單：
+//   第一張：人決定時機，空白鍵＝市價買較便宜的那邊（U／D 鍵指定邊），金額固定。
+//   第二張：空白鍵＝把對面掛成限價單，同樣股數，價格 = 1 − p1 − 第一張手續費 − 目標利潤（掛單不收手續費）。
 (function () {
   "use strict";
   const L = PairLogic;
   const WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
   const SLUG_RE = /((btc|eth|sol|xrp)-updown-5m-(\d{9,11}))/;
-  let cfg = { addr: "", amount: 5, l1: 0.40 };
+  const CFG0 = { addr: "", amount: 5, margin: L.DEFAULTS.MARGIN, last: L.DEFAULTS.LAST };
+  let cfg = Object.assign({}, CFG0);
   let mkt = null;          // {slug, asset, start, tokens:{Up,Down}, conditionId}
   let book = {};           // tokenId -> {asks: Map(price->size), bids: Map}
   let ws = null, pingT = null;
-  let trades = [];         // 自己在這場的成交（data-api）
   let pos = L.positionFrom([]);
-  let pendingUntil = 0;    // 剛按下買入後的冷卻，避免成交紀錄還沒更新就再按一次
+  let pendingUntil = 0;    // 剛送出後的冷卻，避免成交紀錄還沒更新就再按一次
   let lastDecision = null;
-  let settledSlugs = {};
+  let store = { settled: {}, legs: {}, journal: {} };   // 結算統計、每場第二張掛單狀態、每場紀錄
+  let hist = [];           // 這一場每秒的兩邊賣價 [s, up, down]
 
-  // ---------- 設定 ----------
-  chrome.storage.sync.get({ addr: "", amount: 5, l1: 0.40 }, v => { cfg = v; });
+  // ---------- 設定與儲存 ----------
+  chrome.storage.sync.get(CFG0, v => { cfg = v; });
   chrome.storage.onChanged.addListener((ch, area) => { if (area === "sync") for (const k in ch) cfg[k] = ch[k].newValue; });
-  chrome.storage.local.get({ settled: {} }, v => { settledSlugs = v.settled || {}; });
+  chrome.storage.local.get({ settled: {}, legs: {}, journal: {} }, v => { store = v; });
+  let saveT = null;
+  function save() { clearTimeout(saveT); saveT = setTimeout(() => chrome.storage.local.set(store), 300); }
+  const stOf = slug => (store.legs[slug] = store.legs[slug] || {});
+  const recOf = () => (store.journal[mkt.slug] = store.journal[mkt.slug] || { slug: mkt.slug, asset: mkt.asset });
+  const lcfg = () => ({ AMOUNT: Number(cfg.amount) || 5, MARGIN: Number(cfg.margin) || L.DEFAULTS.MARGIN, LAST: Number(cfg.last) || L.DEFAULTS.LAST });
 
   // ---------- 面板 ----------
   const panel = document.createElement("div"); panel.id = "pp-panel";
   panel.innerHTML = `<div class="pp-h"><span id="pp-title">開盤配對助手</span><span><span class="pp-t" id="pp-time"></span> <span class="pp-x" id="pp-min">—</span></span></div>
     <div id="pp-body"><div class="pp-asks"><div class="pp-ask" id="pp-up">Up 賣價<b>—</b></div><div class="pp-ask" id="pp-dn">Down 賣價<b>—</b></div></div>
     <div class="pp-msg" id="pp-msg">打開任何一場 BTC／ETH／SOL 5 分鐘盤</div>
-    <button id="pp-go" class="pp-go" disabled>空白鍵／點這裡：買規則指定的那一邊</button>
-    <div class="pp-row" id="pp-pos"></div><div class="pp-row" id="pp-stats"></div><div class="pp-warn" id="pp-warn"></div></div>`;
+    <button id="pp-go" class="pp-go" disabled>空白鍵</button>
+    <div class="pp-row" id="pp-pos"></div><div class="pp-row" id="pp-stats"></div>
+    <div class="pp-row"><a id="pp-reset" class="pp-link" style="display:none">第二張重掛（先在頁面上取消舊掛單）</a></div>
+    <div class="pp-warn" id="pp-warn"></div></div>`;
   function mount() { if (!document.getElementById("pp-panel")) document.body.appendChild(panel); }
   mount();
   panel.querySelector("#pp-min").onclick = () => { const b = panel.querySelector("#pp-body"); b.style.display = b.style.display === "none" ? "" : "none"; };
+  panel.querySelector("#pp-reset").onclick = () => { if (mkt) { delete stOf(mkt.slug).leg2; save(); flash("已清除第二張掛單紀錄，可以重新按空白鍵掛單", "ok"); } };
   (function drag() {
     const h = panel.querySelector(".pp-h"); let dx = 0, dy = 0, on = false;
     h.addEventListener("mousedown", e => { on = true; dx = e.clientX - panel.offsetLeft; dy = e.clientY - panel.offsetTop; });
     document.addEventListener("mousemove", e => { if (on) { panel.style.left = (e.clientX - dx) + "px"; panel.style.top = (e.clientY - dy) + "px"; panel.style.right = "auto"; } });
     document.addEventListener("mouseup", () => { on = false; });
   })();
-  function flash(text) {
+  function flash(text, kind) {
     let f = document.getElementById("pp-flash");
     if (!f) { f = document.createElement("div"); f.id = "pp-flash"; document.body.appendChild(f); }
-    f.textContent = text; f.style.display = "block"; clearTimeout(flash.t); flash.t = setTimeout(() => { f.style.display = "none"; }, 3500);
+    f.textContent = text; f.className = kind === "ok" ? "ok" : ""; f.style.display = "block";
+    clearTimeout(flash.t); flash.t = setTimeout(() => { f.style.display = "none"; }, 3500);
   }
+  const warn = t => { panel.querySelector("#pp-warn").textContent = t; };
 
   // ---------- 盤口 ----------
   function best(tok, side) {
@@ -74,10 +87,11 @@
     ws.onmessage = e => onWs(String(e.data));
     ws.onclose = () => { clearInterval(pingT); if (mkt && mkt.slug === slug) setTimeout(() => { if (mkt && mkt.slug === slug) connect(); }, 1500); };
   }
+  const asksNow = () => ({ Up: best(mkt.tokens.Up, "ask"), Down: best(mkt.tokens.Down, "ask") });
 
-  // ---------- 市場與自己的成交 ----------
+  // ---------- 市場、自己的成交、結算 ----------
   async function loadMarket(slug) {
-    const r = await fetch(`https://gamma-api.polymarket.com/events?slug=${slug}`); const d = await r.json();
+    const d = await (await fetch(`https://gamma-api.polymarket.com/events?slug=${slug}`)).json();
     if (!d || !d.length) return null;
     const m = d[0].markets[0]; const toks = JSON.parse(m.clobTokenIds), outs = JSON.parse(m.outcomes);
     return { slug, asset: slug.split("-")[0].toUpperCase(), start: Number(slug.split("-").pop()), conditionId: m.conditionId,
@@ -87,122 +101,162 @@
     if (!mkt || !cfg.addr) return;
     try {
       const r = await fetch(`https://data-api.polymarket.com/trades?user=${cfg.addr}&market=${mkt.conditionId}&limit=100&takerOnly=false`);
-      const d = await r.json(); if (Array.isArray(d)) { trades = d; pos = L.positionFrom(trades); }
+      const d = await r.json(); if (!Array.isArray(d)) return;
+      pos = L.positionFrom(d);
+      if (pos.first) {                                   // 把真實成交寫進這一場的紀錄
+        const rec = recOf(), s1 = pos.first, s2 = L.other(s1);
+        Object.assign(rec, { leg1_side: s1, leg1_price: pos[s1].avg, leg1_shares: pos[s1].shares, leg1_s: pos[s1].firstTs - mkt.start,
+                             leg2_filled_shares: pos[s2].shares, leg2_fill_s: pos[s2].lastTs != null ? pos[s2].lastTs - mkt.start : null });
+        save();
+      }
     } catch (e) {}
   }
   async function checkSettled() {
-    if (!mkt || settledSlugs[mkt.slug] || (pos.Up.shares + pos.Down.shares) === 0) return;
+    if (!mkt || store.settled[mkt.slug] || (pos.Up.shares + pos.Down.shares) === 0) return;
     if (Date.now() / 1000 < mkt.start + 300 + 20) return;
     try {
       const d = await (await fetch(`https://gamma-api.polymarket.com/events?slug=${mkt.slug}`)).json();
       const m = d[0].markets[0]; const pr = JSON.parse(m.outcomePrices || "[]"); const outs = JSON.parse(m.outcomes);
       const i = pr.findIndex(x => Number(x) >= 0.99); if (i < 0) return;
-      const res = L.settle(pos, outs[i]);
-      settledSlugs[mkt.slug] = Object.assign({ winner: outs[i], day: new Date().toISOString().slice(0, 10), up: pos.Up.shares, down: pos.Down.shares }, res);
-      chrome.storage.local.set({ settled: settledSlugs });
+      const res = L.settle(pos, outs[i], !!stOf(mkt.slug).leg2);
+      store.settled[mkt.slug] = Object.assign({ winner: outs[i], day: new Date().toISOString().slice(0, 10), up: pos.Up.shares, down: pos.Down.shares }, res);
+      Object.assign(recOf(), { winner: outs[i], paired: res.paired ? 1 : 0, pnl: res.pnl });
+      save();
     } catch (e) {}
   }
 
-  // ---------- 擋違規的買入 ----------
-  // 頁面結構（2026-10-29 實測）：Up／Down 是 role="radio" 的按鈕，文字含滾動數字動畫（例如「Down 1¢ 9 8 7 … ¢」），
-  // 選中的那顆 aria-checked="true"；下單模式有「1-Tap」（直接點 $5／$25／$100 就買）和市價（金額欄＋「買入 Up」按鈕）。
+  // ---------- 讀頁面（2026-10-30 實測，未登入）----------
+  // 結果按鈕 role="radio"（文字「Up 51¢」）；買入／賣出也是 role="radio"；
+  // 下單模式選單：button[aria-haspopup=menu] 文字為 1-Tap／盤口（市價）／限價，選項是 role="menuitemradio"，鍵盤 Enter 才打得開；
+  // 1-Tap：按鈕「$5 win $9.80」；市價：金額欄 placeholder「$0」；限價：價格欄 placeholder「0¢」（單位分）、份額欄 placeholder「0」；
+  // 送出按鈕未登入時文字是「交易」，登入後可能是「買入 Up」之類，兩種都認。
   const norm = b => (b.innerText || b.textContent || "").trim().replace(/\s+/g, " ");
   const cap1 = x => x[0].toUpperCase() + x.slice(1).toLowerCase();
-  function outcomeRadios() {
-    return [...document.querySelectorAll('button[role="radio"]')].filter(b => /^(Up|Down)\b/i.test(norm(b)));
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const radios = re => [...document.querySelectorAll('button[role="radio"]')].filter(b => re.test(norm(b)));
+  const isOn = b => b.getAttribute("aria-checked") === "true" || b.getAttribute("data-state") === "checked";
+  const outcomeRadios = () => radios(/^(Up|Down)\b/i);
+  function checkedOutcome() { const r = outcomeRadios().find(isOn); return r ? cap1(norm(r).split(" ")[0]) : null; }
+  const sellTabOn = () => radios(/^(賣出|Sell)$/i).some(isOn);
+  const MODE_RE = /^(1-Tap|盤口|市價|限價|Market|Limit)$/i;
+  const modeTrigger = () => [...document.querySelectorAll('button[aria-haspopup="menu"]')].find(b => MODE_RE.test(norm(b)));
+  function currentMode() { const t = modeTrigger(); if (!t) return null; const x = norm(t); return /1-Tap/i.test(x) ? "tap" : /限價|Limit/i.test(x) ? "limit" : "market"; }
+  const MODE_NAMES = { tap: /^1-Tap$/i, market: /^(盤口|市價|Market)$/i, limit: /^(限價|Limit)$/i };
+  async function setMode(m) {
+    if (currentMode() === m) return true;
+    const t = modeTrigger(); if (!t) return false;
+    const key = (el, k) => el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+    if (!document.querySelector('[role="menuitemradio"]')) { t.focus(); key(t, "Enter"); await sleep(200); }
+    const it = [...document.querySelectorAll('[role="menuitemradio"]')].find(e => MODE_NAMES[m].test(norm(e)));
+    if (!it) return false;
+    it.click(); await sleep(200);
+    const still = document.querySelector('[role="menuitemradio"]'); if (still) { key(still, "Escape"); await sleep(150); }
+    return currentMode() === m;
   }
-  function checkedOutcome() {
-    const r = outcomeRadios().find(b => b.getAttribute("aria-checked") === "true" || b.getAttribute("data-state") === "checked");
-    return r ? cap1(norm(r).split(" ")[0]) : null;
+  const decInputs = () => [...document.querySelectorAll('input[inputmode="decimal"], input[type="text"], input[type="number"]')].filter(i => !/搜尋|search/i.test(i.placeholder || "") && i.offsetParent);
+  const priceInput = () => decInputs().find(i => /¢/.test(i.placeholder || ""));
+  const sharesInput = () => decInputs().find(i => (i.placeholder || "") === "0");
+  const amountInput = () => decInputs().find(i => /\$/.test(i.placeholder || ""));
+  const numOf = inp => { if (!inp) return null; const v = Number(String(inp.value).replace(/[^0-9.]/g, "")); return String(inp.value).trim() === "" || !isFinite(v) ? null : v; };
+  const SUBMIT_RE = /^(交易|Trade|(買入|Buy)\s+(Up|Down)\b.*)$/i;
+  const ONETAP_RE = /^\$\s*([0-9]+(?:\.[0-9]+)?)\s+(win|贏)/i;
+  const findSubmit = () => [...document.querySelectorAll("button:not([role])")].find(b => SUBMIT_RE.test(norm(b)) && b.offsetParent);
+  const findOneTap = amount => [...document.querySelectorAll("button")].find(b => { const m = norm(b).match(ONETAP_RE); return m && Number(m[1]) === amount; });
+  const setVal = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+  function fill(inp, v) { inp.focus(); setVal.call(inp, String(v)); inp.dispatchEvent(new Event("input", { bubbles: true })); inp.dispatchEvent(new Event("change", { bubbles: true })); inp.blur(); }
+
+  // 被點的是不是買入：1-Tap 金額按鈕，或送出按鈕（市價／限價）。回傳要檢查的內容。
+  function classify(el) {
+    const b = el && el.closest ? el.closest("button") : null; if (!b || b.getAttribute("role")) return null;
+    const t = norm(b); let m = t.match(ONETAP_RE);
+    if (m) return { el: b, kind: "market", side: checkedOutcome(), amount: Number(m[1]) };
+    if (!SUBMIT_RE.test(t)) return null;
+    if (sellTabOn()) return { sell: true };
+    m = t.match(/(Up|Down)\b/i); const side = m ? cap1(m[1]) : checkedOutcome();
+    if (currentMode() === "limit") {
+      const c = numOf(priceInput()); return { el: b, kind: "limit", side, price: c == null ? null : c / 100, shares: numOf(sharesInput()) };
+    }
+    return { el: b, kind: "market", side, amount: numOf(amountInput()) };
   }
-  function amountInputNear(el) {
-    let root = el; for (let i = 0; i < 10 && root && root.parentElement; i++) root = root.parentElement;
-    if (!root) return null;
-    return [...root.querySelectorAll("input")].find(i => i.type !== "hidden" && !/搜尋|search/i.test(i.placeholder || "")) || null;
-  }
-  function amountOnPage(btn) {
-    const inp = amountInputNear(btn); if (!inp) return null;
-    const v = Number(String(inp.value).replace(/[^0-9.]/g, "")); return isFinite(v) ? v : null;
-  }
-  // 被點的是不是「買入」：市價模式的「買入 Up／Down」，或 1-Tap 的「$5 win …」
-  function buyButton(el) {
-    const b = el && el.closest ? el.closest("button") : null; if (!b) return null;
-    const t = norm(b);
-    let m = t.match(/^(買入|Buy)\s+(Up|Down)\b/i);
-    if (m) return { el: b, side: cap1(m[2]), amount: null };
-    m = t.match(/^\$\s*([0-9]+(?:\.[0-9]+)?)\s+(win|贏)/i);
-    if (m) { const side = checkedOutcome(); return side ? { el: b, side, amount: Number(m[1]), oneTap: true } : { el: b, side: null, amount: Number(m[1]), oneTap: true }; }
-    return null;
-  }
+
+  // ---------- 擋違規 ----------
   function guard(e) {
-    const bb = buyButton(e.target); if (!bb || !mkt) return;
-    const block = why => { e.preventDefault(); e.stopImmediatePropagation(); flash("擋下：" + why); panel.querySelector("#pp-warn").textContent = "擋下：" + why; };
+    if (!mkt) return; const bb = classify(e.target); if (!bb || bb.sell) return;
+    const block = why => { e.preventDefault(); e.stopImmediatePropagation(); flash("擋下：" + why); warn("擋下：" + why); };
     if (!cfg.addr) return block("先在插件設定填你的錢包地址，插件才知道你買了什麼");
     if (Date.now() < pendingUntil) return block("上一張剛送出，等成交紀錄更新（約 5 秒）");
     const d = lastDecision; if (!d) return block("還沒收到盤口");
     if (!bb.side) return block("讀不到現在選的是 Up 還是 Down");
     if (!d.allow[bb.side]) return block(d.msg);
-    const amt = bb.amount != null ? bb.amount : amountOnPage(bb.el);
-    if (amt == null) return block("讀不到金額欄，請確認是市價買入並填了金額");
-    if (amt > d.maxAmount[bb.side] + 1e-9) return block(`金額 $${amt} 超過上限 $${d.maxAmount[bb.side].toFixed(2)}，不准放大`);
+    if (bb.kind === "limit") {
+      if (d.phase === "first") return block("第一張不可以用限價單，請用市價或 1-Tap");
+      const lim = d.limit[bb.side]; if (!lim) return block("這一邊現在不能掛限價");
+      if (bb.price == null || bb.shares == null) return block("讀不到限價或份額");
+      if (bb.price > lim.price + 1e-9) return block(`限價 ${bb.price.toFixed(2)} 高於上限 ${lim.price.toFixed(2)}`);
+      if (bb.shares > lim.shares + 0.01) return block(`份額 ${bb.shares} 超過第一張的股數 ${lim.shares.toFixed(2)}，不准放大`);
+      stOf(mkt.slug).leg2 = { price: bb.price, shares: bb.shares, s: Date.now() / 1000 - mkt.start };
+      Object.assign(recOf(), { leg2_price: bb.price, leg2_shares: bb.shares, leg2_placed_s: Date.now() / 1000 - mkt.start }); save();
+      warn(`已放行：掛 ${bb.side} 限價 ${bb.price.toFixed(2)} × ${bb.shares} 股`);
+    } else {
+      const max = d.market[bb.side];
+      if (!(max > 0)) return block(d.phase === "second" ? "第二張請用限價掛單（空白鍵）；對面現在的價格吃單不賺錢" : d.msg);
+      if (bb.amount == null) return block("讀不到金額，請確認金額欄有填");
+      if (bb.amount > max + 1e-9) return block(`金額 $${bb.amount} 超過上限 $${max.toFixed(2)}，不准放大`);
+      if (d.phase === "first") {                            // 記下按下第一張那一刻的盤面，之後分析進場判斷
+        const s = Date.now() / 1000 - mkt.start, a = asksNow();
+        const path = hist.filter(h => h[0] >= s - 60).filter((h, i) => i % 2 === 0).map(h => `${h[0]}:${h[1] ?? ""}/${h[2] ?? ""}`).join(";");
+        Object.assign(recOf(), { click_s: s, click_up_ask: a.Up, click_dn_ask: a.Down, path60: path }); save();
+      }
+      warn(`已放行：市價買 ${bb.side} $${bb.amount}`);
+    }
     pendingUntil = Date.now() + 5000;
-    panel.querySelector("#pp-warn").textContent = `已放行：買入 ${bb.side} $${amt}`;
   }
   document.addEventListener("click", guard, true);
-  document.addEventListener("keydown", e => { if (e.key === "Enter") { const a = document.activeElement; if (a && a.tagName === "INPUT" && mkt) { e.preventDefault(); e.stopImmediatePropagation(); flash("請用按鈕買入（Enter 已停用）"); } } }, true);
+  document.addEventListener("keydown", e => {
+    if (e.key !== "Enter" || !mkt) return; const a = document.activeElement;
+    if (a && a.tagName === "INPUT") { e.preventDefault(); e.stopImmediatePropagation(); flash("請用按鈕或空白鍵下單（輸入框裡的 Enter 已停用）"); }
+  }, true);
 
-  // ---------- 一鍵買：切邊、填金額、按買入（人按了才執行） ----------
-  const setVal = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
-  const sleep = ms => new Promise(r => setTimeout(r, ms));
-  function findOutcomeButton(side) {
-    return outcomeRadios().find(b => new RegExp("^" + side + "\\b", "i").test(norm(b)));
-  }
-  function findBuyButton(side) {
-    const re = new RegExp("^(買入|Buy)\\s+" + side + "\\b", "i");
-    return [...document.querySelectorAll("button")].find(b => re.test(norm(b)));
-  }
-  function findOneTap(amount) {
-    return [...document.querySelectorAll("button")].find(b => { const m = norm(b).match(/^\$\s*([0-9]+(?:\.[0-9]+)?)\s+(win|贏)/i); return m && Number(m[1]) === amount; });
-  }
-  const findAmountInput = near => amountInputNear(near);
-  function pickSide(d) {
-    const sides = ["Up", "Down"].filter(x => d.allow[x]);
-    if (!sides.length) return null;
-    if (sides.length === 1) return sides[0];
-    const a = { Up: best(mkt.tokens.Up, "ask"), Down: best(mkt.tokens.Down, "ask") };
-    return a.Up <= a.Down ? "Up" : "Down";
-  }
+  // ---------- 一鍵下單（人按了才執行；送出時一樣經過上面的檢查）----------
   let busy = false;
-  async function quickBuy() {
+  async function quickBuy(force) {
     if (busy || !mkt) return; const d = lastDecision;
     if (!cfg.addr) return flash("先在插件設定填你的錢包地址");
     if (!d) return flash("還沒收到盤口");
-    const side = pickSide(d); if (!side) return flash("現在不能買：" + d.msg);
+    if (Date.now() < pendingUntil) return flash("上一張剛送出，等成交紀錄更新");
+    if (force && d.phase !== "first") return flash("U／D 只用在第一張；第二張按空白鍵");
+    const sg = force ? (d.allow[force] ? { kind: "market", side: force, amount: d.market[force] } : null) : d.suggest;
+    if (!sg) return flash("現在不能下單：" + d.msg);
     busy = true;
     try {
-      const ob = findOutcomeButton(side); if (!ob) return flash(`找不到頁面上的「${side}」按鈕`);
-      ob.click(); await sleep(120);
-      const pos2 = pos; const a = best(mkt.tokens[side], "ask");
-      if (d.phase === "first") {                         // 1-Tap 模式下第一張直接點同金額的按鈕
-        const t = findOneTap(Number(cfg.amount) || 5);
-        if (t) { t.click(); return; }
+      const buyTab = radios(/^(買入|Buy)$/i)[0]; if (buyTab && !isOn(buyTab)) { buyTab.click(); await sleep(120); }
+      if (sg.kind === "market") {
+        const tapOk = await setMode("tap");
+        const ob = outcomeRadios().find(b => new RegExp("^" + sg.side + "\\b", "i").test(norm(b))); if (!ob) return flash(`找不到「${sg.side}」按鈕`);
+        if (!isOn(ob)) { ob.click(); await sleep(150); }
+        const t = tapOk && findOneTap(sg.amount); if (t) { t.click(); return; }
+        if (!(await setMode("market"))) return flash("切不到市價模式");
+        const ob2 = outcomeRadios().find(b => new RegExp("^" + sg.side + "\\b", "i").test(norm(b))); if (ob2 && !isOn(ob2)) { ob2.click(); await sleep(150); }
+        const inp = amountInput(); if (!inp) return flash("找不到金額欄");
+        fill(inp, sg.amount); await sleep(200);
+        const sb = findSubmit(); if (!sb) return flash("找不到送出按鈕"); sb.click();
+      } else {
+        if (!(await setMode("limit"))) return flash("切不到限價模式");
+        const ob = outcomeRadios().find(b => new RegExp("^" + sg.side + "\\b", "i").test(norm(b))); if (!ob) return flash(`找不到「${sg.side}」按鈕`);
+        if (!isOn(ob)) { ob.click(); await sleep(150); }
+        const pi = priceInput(), si = sharesInput(); if (!pi || !si) return flash("找不到限價或份額欄");
+        fill(pi, Math.round(sg.price * 100)); fill(si, sg.shares.toFixed(2)); await sleep(250);
+        const sb = findSubmit(); if (!sb) return flash("找不到送出按鈕"); sb.click();
       }
-      const bb = findBuyButton(side);
-      if (!bb) return flash(d.phase === "first" ? `找不到「買入 ${side}」或「$${cfg.amount}」按鈕` : "第二張要買同樣股數：請把下單模式切到市價（有金額欄的那個）");
-      const inp = findAmountInput(bb); if (!inp) return flash("找不到金額欄");
-      let amt = d.phase === "first" ? Number(cfg.amount) || 5 : Math.floor((pos2[L.other(side)].shares - pos2[side].shares) * a * 100) / 100;
-      amt = Math.min(amt, d.maxAmount[side]);
-      if (!(amt > 0)) return flash("算不出金額");
-      inp.focus(); setVal.call(inp, String(amt)); inp.dispatchEvent(new Event("input", { bubbles: true })); inp.dispatchEvent(new Event("change", { bubbles: true }));
-      await sleep(150);
-      bb.click();                                   // 會再經過 guard 的規則與金額檢查
     } finally { setTimeout(() => { busy = false; }, 400); }
   }
   panel.querySelector("#pp-go").onclick = e => { e.preventDefault(); e.stopPropagation(); quickBuy(); };
   document.addEventListener("keydown", e => {
-    if (e.code !== "Space" || !mkt) return;
+    if (!mkt || e.repeat) return;
     const a = document.activeElement; if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable)) return;
-    e.preventDefault(); e.stopImmediatePropagation(); quickBuy();
+    const f = e.code === "Space" ? null : e.code === "KeyU" ? "Up" : e.code === "KeyD" ? "Down" : undefined;
+    if (f === undefined || e.metaKey || e.ctrlKey || e.altKey) return;
+    e.preventDefault(); e.stopImmediatePropagation(); quickBuy(f);
   }, true);
 
   // ---------- 主迴圈 ----------
@@ -211,31 +265,34 @@
     const m = location.pathname.match(SLUG_RE); lastPath = location.pathname;
     if (!m) { mkt = null; connect(); render(); return; }
     if (mkt && mkt.slug === m[1]) return;
-    mkt = null; trades = []; pos = L.positionFrom([]); render();
+    mkt = null; pos = L.positionFrom([]); hist = []; render();
     try { mkt = await loadMarket(m[1]); } catch (e) { mkt = null; }
     connect(); loadTrades();
   }
   function render() {
     mount();
     const $ = s => panel.querySelector(s);
-    if (!mkt) { $("#pp-title").textContent = "開盤配對助手"; $("#pp-time").textContent = ""; $("#pp-msg").textContent = "打開任何一場 BTC／ETH／SOL 5 分鐘盤"; $("#pp-msg").className = "pp-msg"; lastDecision = null; return; }
-    const s = Date.now() / 1000 - mkt.start;
-    const asks = { Up: best(mkt.tokens.Up, "ask"), Down: best(mkt.tokens.Down, "ask") };
-    const d = L.decide(s, asks, pos, { L1: Number(cfg.l1) || 0.40, AMOUNT: Number(cfg.amount) || 5 });
+    if (!mkt) { $("#pp-title").textContent = "開盤配對助手"; $("#pp-time").textContent = ""; $("#pp-msg").textContent = "打開任何一場 BTC／ETH／SOL 5 分鐘盤"; $("#pp-msg").className = "pp-msg"; $("#pp-go").disabled = true; lastDecision = null; return; }
+    const s = Date.now() / 1000 - mkt.start, asks = asksNow();
+    const si = Math.floor(s); if (!hist.length || hist[hist.length - 1][0] !== si) { hist.push([si, asks.Up, asks.Down]); if (hist.length > 400) hist.shift(); }
+    const st = stOf(mkt.slug), d = L.decide(s, asks, pos, lcfg(), st);
     lastDecision = d;
     const hh = new Date(mkt.start * 1000); $("#pp-title").textContent = `${mkt.asset} ${String(hh.getHours()).padStart(2, "0")}:${String(hh.getMinutes()).padStart(2, "0")} 場`;
     $("#pp-time").textContent = s < 0 ? `開盤前 ${Math.ceil(-s)}s` : `開盤後 +${Math.floor(s)}s`;
-    $("#pp-up").innerHTML = `Up 賣價<b>${asks.Up == null ? "—" : asks.Up.toFixed(2)}</b>`; $("#pp-up").className = "pp-ask" + (d.allow.Up ? " hot" : "");
-    $("#pp-dn").innerHTML = `Down 賣價<b>${asks.Down == null ? "—" : asks.Down.toFixed(2)}</b>`; $("#pp-dn").className = "pp-ask" + (d.allow.Down ? " hot" : "");
+    const hot = x => d.suggest && d.suggest.side === x;
+    $("#pp-up").innerHTML = `Up 賣價<b>${asks.Up == null ? "—" : asks.Up.toFixed(2)}</b>`; $("#pp-up").className = "pp-ask" + (hot("Up") ? " hot" : "");
+    $("#pp-dn").innerHTML = `Down 賣價<b>${asks.Down == null ? "—" : asks.Down.toFixed(2)}</b>`; $("#pp-dn").className = "pp-ask" + (hot("Down") ? " hot" : "");
     $("#pp-msg").textContent = cfg.addr ? d.msg : "先到插件設定填你的錢包地址（右鍵插件圖示 → 選項）";
     $("#pp-msg").className = "pp-msg " + (cfg.addr ? d.level : "stop");
-    const goSide = cfg.addr ? pickSide(d) : null; const go = $("#pp-go");
-    go.disabled = !goSide; go.textContent = goSide ? `空白鍵：買 ${goSide}${d.phase === "first" ? `（$${cfg.amount}）` : "（補同樣股數）"}` : "現在沒有可以買的";
+    const go = $("#pp-go"), sg = cfg.addr ? d.suggest : null;
+    go.disabled = !sg;
+    go.textContent = !sg ? "現在沒有可以做的" : sg.kind === "market" ? `空白鍵：市價買 ${sg.side} $${sg.amount}（U／D 指定邊）` : `空白鍵：掛 ${sg.side} 限價 ${sg.price.toFixed(2)} × ${sg.shares.toFixed(2)} 股`;
+    $("#pp-reset").style.display = d.phase === "waiting" ? "" : "none";
     $("#pp-pos").textContent = `部位：Up ${pos.Up.shares.toFixed(2)} 股${pos.Up.avg ? " @" + pos.Up.avg.toFixed(3) : ""}｜Down ${pos.Down.shares.toFixed(2)} 股${pos.Down.avg ? " @" + pos.Down.avg.toFixed(3) : ""}`;
-    const today = new Date().toISOString().slice(0, 10); const rs = Object.values(settledSlugs).filter(r => r.day === today);
+    const today = new Date().toISOString().slice(0, 10); const rs = Object.values(store.settled).filter(r => r.day === today);
     if (rs.length) {
       const pnl = rs.reduce((a, r) => a + r.pnl, 0), paired = rs.filter(r => r.paired).length;
-      $("#pp-stats").textContent = `今日：${rs.length} 場，成對 ${paired}、補不到 ${rs.length - paired}，損益 ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`;
+      $("#pp-stats").textContent = `今日：${rs.length} 場，成對 ${paired}、沒補到 ${rs.length - paired}，損益 ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`;
     } else $("#pp-stats").textContent = "今日：尚無結算";
   }
   setInterval(() => { if (location.pathname !== lastPath) onRoute(); render(); }, 250);

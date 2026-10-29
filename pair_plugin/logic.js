@@ -1,28 +1,37 @@
-// 開盤配對規則（純函式，content script 和測試共用）。fish 2026-10-29：
-//   開盤後第一分鐘，哪一邊先跌到 L1（0.40）就用市價買第一張；之後另一邊跌到「扣兩次手續費後仍賺錢」的價位再買同樣股數；
-//   抱到結算拿 $1。每張金額固定，不准放大；同一場只做一組。
+// 開盤配對規則（純函式，content script 和測試共用）。
+// 人工模式（fish 2026-10-30）：
+//   第一張：什麼時候買、買哪一邊由人決定，只能用市價（1-Tap 或市價單），金額固定，不准放大。
+//   第二張：插件算好「同樣股數」和掛單價 p2 = 1 − p1 − 第一張手續費 − 目標利潤，人按空白鍵掛限價單（掛單不收手續費）。
+//   抱到結算拿 $1。同一場只做一組；不准加買第一張那一邊。
 var PairLogic = (function () {
-  const FEE_RATE = 0.07;                         // Polymarket 加密盤吃單手續費：7% × p × (1 − p) × 股數，另外加收
-  const DEFAULTS = { L1: 0.40, FIRST: 60, AMOUNT: 5, LEG2_SLACK: 0.03 };
+  const FEE_RATE = 0.07;                         // Polymarket 加密盤吃單手續費：7% × p × (1 − p) × 股數，另外加收；掛單不收
+  const DEFAULTS = { AMOUNT: 5, MARGIN: 0.07, LAST: 240, LEG2_SLACK: 0.03 };
+  const EPS_SH = 0.05;                           // 兩邊股數差在這以內就算成對（市價買會有零碎股數）
 
   function fee(p) { return FEE_RATE * p * (1 - p); }
-  function pairProfit(p1, p2) { return 1 - p1 - p2 - fee(p1) - fee(p2); }
+  function pairProfit(p1, p2) { return 1 - p1 - p2 - fee(p1) - fee(p2); }       // 兩張都吃單
+  function makerProfit(p1, p2) { return 1 - p1 - p2 - fee(p1); }                // 第二張掛單
 
-  // 第二張最高可以買到多少錢（每股），買到這個價以下就保證賺錢（> 0.001）
+  // 第二張掛單價：扣掉第一張手續費後，每股至少留 margin 的利潤，取整到 1 分
+  function leg2Price(p1, margin) { return Math.floor((1 - p1 - fee(p1) - margin) * 100 + 1e-9) / 100; }
+  // 第二張若用市價（吃單），最高可以買到多少錢還賺錢（> 0.001）
   function leg2Cap(p1) {
     let lo = 0, hi = 1;
     for (let i = 0; i < 50; i++) { const mid = (lo + hi) / 2; if (pairProfit(p1, mid) > 0.001) lo = mid; else hi = mid; }
     return Math.floor(lo * 100 + 1e-9) / 100;
   }
 
-  // 從自己的成交紀錄整理出兩邊的股數、平均價和第一張
+  // 從自己的成交紀錄整理出兩邊的股數、平均價、第一張是哪邊、成交時間
   function positionFrom(trades) {
-    const pos = { Up: { shares: 0, cost: 0 }, Down: { shares: 0, cost: 0 }, first: null };
+    const mk = () => ({ shares: 0, cost: 0, firstTs: null, lastTs: null });
+    const pos = { Up: mk(), Down: mk(), first: null };
     const buys = (trades || []).filter(t => String(t.side).toUpperCase() === "BUY").sort((a, b) => a.timestamp - b.timestamp);
     for (const t of buys) {
       const o = t.outcome === "Up" ? "Up" : t.outcome === "Down" ? "Down" : null;
       if (!o) continue;
       pos[o].shares += Number(t.size); pos[o].cost += Number(t.size) * Number(t.price);
+      if (pos[o].firstTs == null) pos[o].firstTs = Number(t.timestamp);
+      pos[o].lastTs = Number(t.timestamp);
       if (!pos.first) pos.first = o;
     }
     for (const o of ["Up", "Down"]) pos[o].avg = pos[o].shares ? pos[o].cost / pos[o].shares : null;
@@ -30,53 +39,77 @@ var PairLogic = (function () {
   }
 
   function other(side) { return side === "Up" ? "Down" : "Up"; }
+  const f2 = x => (x == null ? "—" : x.toFixed(2));
 
-  // 現在該做什麼、哪一邊可以按買入、金額上限多少。sFromOpen = 現在 − 開盤時間（秒）
-  function decide(sFromOpen, asks, pos, cfg) {
-    cfg = Object.assign({}, DEFAULTS, cfg || {});
-    const res = { phase: "", msg: "", allow: { Up: false, Down: false }, maxAmount: { Up: 0, Down: 0 }, cap: null, need: null, level: "wait" };
-    const hasUp = pos.Up.shares > 0, hasDown = pos.Down.shares > 0;
-    if (hasUp && hasDown) {
-      const sh = Math.min(pos.Up.shares, pos.Down.shares);
-      const locked = sh * (1 - pos.Up.avg - pos.Down.avg - fee(pos.Up.avg) - fee(pos.Down.avg));
+  // 現在可以做什麼。sFromOpen = 現在 − 開盤時間（秒）；st = 插件記住的這一場狀態（st.leg2 = {price, shares} 表示第二張已掛）
+  // allow[side]：這邊能不能買；market[side]：市價最多花多少美元；limit[side]：{price, shares} 限價最高價和最多股數；
+  // suggest：空白鍵要做的事。
+  function decide(sFromOpen, asks, pos, cfg, st) {
+    cfg = Object.assign({}, DEFAULTS, cfg || {}); st = st || {};
+    const res = { phase: "", msg: "", level: "wait", allow: { Up: false, Down: false }, market: { Up: 0, Down: 0 }, limit: { Up: null, Down: null }, suggest: null };
+    if (pos.Up.shares > 0 && pos.Down.shares > 0 && Math.abs(pos.Up.shares - pos.Down.shares) <= EPS_SH) {
+      const s1 = pos.first, s2 = other(s1), sh = Math.min(pos.Up.shares, pos.Down.shares);
+      const locked = sh * (1 - pos.Up.avg - pos.Down.avg) - pos[s1].shares * fee(pos[s1].avg) - (st.leg2 ? 0 : pos[s2].shares * fee(pos[s2].avg));
       res.phase = "done"; res.level = "done";
       res.msg = `本場已成對：Up ${pos.Up.shares.toFixed(2)} 股 @${pos.Up.avg.toFixed(3)}，Down ${pos.Down.shares.toFixed(2)} 股 @${pos.Down.avg.toFixed(3)}，鎖定約 $${locked.toFixed(2)}。本場不再下單。`;
       return res;
     }
+    if (sFromOpen >= 300) { res.phase = "closed"; res.level = "stop"; res.msg = "本場已收盤。"; return res; }
     if (!pos.first) {
       if (sFromOpen < 0) { res.phase = "pre"; res.msg = `等開盤（還有 ${Math.ceil(-sFromOpen)} 秒）`; return res; }
-      if (sFromOpen > cfg.FIRST) { res.phase = "late"; res.level = "stop"; res.msg = `開盤已超過 ${cfg.FIRST} 秒，本場不開第一張。`; return res; }
-      res.phase = "first";
-      const hit = ["Up", "Down"].filter(s => asks[s] != null && asks[s] <= cfg.L1 + 1e-9);
-      if (!hit.length) { res.msg = `等任一邊跌到 ${cfg.L1.toFixed(2)}（剩 ${Math.max(0, Math.floor(cfg.FIRST - sFromOpen))} 秒）`; return res; }
-      for (const s of hit) { res.allow[s] = true; res.maxAmount[s] = cfg.AMOUNT; }
-      res.level = "go";
-      res.msg = `可以買第一張：${hit.map(s => `${s} @${asks[s].toFixed(2)}`).join("、")}（市價，金額 $${cfg.AMOUNT}）`;
+      if (sFromOpen > cfg.LAST) { res.phase = "late"; res.level = "stop"; res.msg = `開盤已超過 ${cfg.LAST} 秒，本場不開第一張。`; return res; }
+      res.phase = "first"; res.level = "ready";
+      for (const s of ["Up", "Down"]) if (asks[s] != null) { res.allow[s] = true; res.market[s] = cfg.AMOUNT; }
+      const cheap = asks.Up == null ? "Down" : asks.Down == null ? "Up" : (asks.Up <= asks.Down ? "Up" : "Down");
+      if (asks[cheap] == null) { res.msg = "等盤口報價"; return res; }
+      res.suggest = { kind: "market", side: cheap, amount: cfg.AMOUNT };
+      res.msg = `進場時機你決定。空白鍵＝市價買較便宜的 ${cheap} @${f2(asks[cheap])}（$${cfg.AMOUNT}）；U／D 鍵指定邊。` +
+        `買在 ${f2(asks[cheap])}，對面要跌到 ${f2(leg2Price(asks[cheap], cfg.MARGIN))} 才補得到。`;
       return res;
     }
-    // 已有第一張，等第二張
-    const s1 = pos.first, s2 = other(s1), p1 = pos[s1].avg;
-    res.phase = "second"; res.cap = leg2Cap(p1); res.need = pos[s1].shares - pos[s2].shares;
-    const a2 = asks[s2];
-    if (a2 != null && a2 <= res.cap + 1e-9) {
-      res.allow[s2] = true; res.level = "go";
-      res.maxAmount[s2] = Math.round(res.need * a2 * (1 + cfg.LEG2_SLACK) * 100) / 100;
-      res.msg = `可以買第二張：${s2} @${a2.toFixed(2)} ≤ ${res.cap.toFixed(2)}，買 ${res.need.toFixed(2)} 股（約 $${(res.need * a2).toFixed(2)}），每股賺約 ${(pairProfit(p1, a2) * 100).toFixed(1)} 分`;
-    } else {
-      res.msg = `已買 ${s1} ${pos[s1].shares.toFixed(2)} 股 @${p1.toFixed(3)}。等 ${s2} 跌到 ${res.cap.toFixed(2)} 以下（現在 ${a2 == null ? "—" : a2.toFixed(2)}）。不准加買 ${s1}。`;
+    // 已有第一張，處理第二張
+    const s1 = pos.first, s2 = other(s1), p1 = pos[s1].avg, a2 = asks[s2];
+    const need = Math.floor((pos[s1].shares - pos[s2].shares) * 100) / 100;
+    const p2 = leg2Price(p1, cfg.MARGIN);
+    res.phase = "second"; res.p2 = p2; res.need = need;
+    if (need < EPS_SH) { res.phase = "done"; res.level = "done"; res.msg = "兩邊股數已一樣，本場不再下單。"; return res; }
+    if (st.leg2) {
+      res.phase = "waiting";
+      res.msg = `第二張掛單已送出：${s2} @${f2(st.leg2.price)} × ${st.leg2.shares.toFixed(2)} 股，已成交 ${pos[s2].shares.toFixed(2)} 股。` +
+        `等 ${s2} 賣價跌到 ${f2(st.leg2.price)}（現在 ${f2(a2)}）。不准加買 ${s1}。`;
+      return res;
     }
+    res.allow[s2] = true; res.limit[s2] = { price: p2, shares: need };
+    if (a2 != null && pairProfit(p1, a2) > 0.001) res.market[s2] = Math.round(need * a2 * (1 + cfg.LEG2_SLACK) * 100) / 100;
+    res.suggest = { kind: "limit", side: s2, price: p2, shares: need };
+    res.level = "go";
+    const cross = a2 != null && a2 <= p2 + 1e-9;
+    res.msg = `已買 ${s1} ${pos[s1].shares.toFixed(2)} 股 @${p1.toFixed(3)}。空白鍵＝掛 ${s2} 限價 @${f2(p2)} × ${need.toFixed(2)} 股` +
+      `（零手續費，成交後每股賺約 ${(makerProfit(p1, p2) * 100).toFixed(1)} 分）。` +
+      (cross ? `對面現在 ${f2(a2)} 已低於掛單價，會立刻吃單成交（收手續費，每股約賺 ${(pairProfit(p1, a2) * 100).toFixed(1)} 分）。` : `對面現在 ${f2(a2)}。`) +
+      `不准加買 ${s1}。`;
     return res;
   }
 
-  // 結算後這一場的損益（含估計手續費）
-  function settle(pos, winner) {
+  // 結算後這一場的損益（第一張收吃單手續費；第二張若是掛單不收）
+  function settle(pos, winner, leg2Maker) {
     const cost = pos.Up.cost + pos.Down.cost;
-    const fees = (pos.Up.shares ? fee(pos.Up.avg) * pos.Up.shares : 0) + (pos.Down.shares ? fee(pos.Down.avg) * pos.Down.shares : 0);
+    let fees = 0;
+    for (const o of ["Up", "Down"]) if (pos[o].shares && !(leg2Maker && o !== pos.first)) fees += fee(pos[o].avg) * pos[o].shares;
     const payout = winner === "Up" ? pos.Up.shares : winner === "Down" ? pos.Down.shares : 0;
-    const paired = pos.Up.shares > 0 && pos.Down.shares > 0;
+    const paired = pos.Up.shares > 0 && pos.Down.shares > 0 && Math.abs(pos.Up.shares - pos.Down.shares) <= EPS_SH;
     return { cost, fees, payout, pnl: payout - cost - fees, paired };
   }
 
-  return { FEE_RATE, DEFAULTS, fee, pairProfit, leg2Cap, positionFrom, decide, settle, other };
+  // 每場紀錄匯出成 CSV（給之後分析 fish 的進場判斷）
+  const COLS = ["slug", "asset", "leg1_side", "leg1_price", "leg1_shares", "leg1_s", "click_s", "click_up_ask", "click_dn_ask", "path60",
+                "leg2_price", "leg2_shares", "leg2_placed_s", "leg2_filled_shares", "leg2_fill_s", "winner", "paired", "pnl"];
+  function toCSV(records) {
+    const esc = v => { if (v == null) return ""; const s = typeof v === "number" ? String(Math.round(v * 10000) / 10000) : String(v);
+                       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    return [COLS.join(",")].concat(records.map(r => COLS.map(c => esc(r[c])).join(","))).join("\n") + "\n";
+  }
+
+  return { FEE_RATE, DEFAULTS, EPS_SH, fee, pairProfit, makerProfit, leg2Price, leg2Cap, positionFrom, decide, settle, other, toCSV, COLS };
 })();
 if (typeof module !== "undefined") module.exports = PairLogic;

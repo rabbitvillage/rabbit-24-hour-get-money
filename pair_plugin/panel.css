@@ -18,3 +18,6 @@
 #pp-panel .pp-go{width:100%;margin:6px 0 2px;padding:12px;font:700 16px -apple-system,"PingFang TC",sans-serif;border:0;border-radius:10px;
   background:#10b981;color:#062e22;cursor:pointer}
 #pp-panel .pp-go:disabled{background:#374151;color:#9ca3af;cursor:default}
+#pp-panel .pp-msg.ready{background:#1f2937;outline:1px solid #34d399}
+#pp-panel .pp-link{color:#93c5fd;cursor:pointer;text-decoration:underline}
+#pp-flash.ok{background:#047857}

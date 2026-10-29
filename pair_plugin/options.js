@@ -1,9 +1,18 @@
 const $ = id => document.getElementById(id);
-chrome.storage.sync.get({ addr: "", amount: 5, l1: 0.40 }, v => { $("addr").value = v.addr; $("amount").value = v.amount; $("l1").value = v.l1; });
+const D = { addr: "", amount: 5, margin: PairLogic.DEFAULTS.MARGIN, last: PairLogic.DEFAULTS.LAST };
+chrome.storage.sync.get(D, v => { for (const k in D) $(k).value = v[k]; });
 $("save").onclick = () => {
   const addr = $("addr").value.trim();
   if (addr && !/^0x[0-9a-fA-F]{40}$/.test(addr)) { $("ok").textContent = "地址格式不對"; return; }
   const amount = Math.max(1, Math.round(Number($("amount").value) || 5));
-  const l1 = Math.min(0.49, Math.max(0.10, Number($("l1").value) || 0.40));
-  chrome.storage.sync.set({ addr, amount, l1 }, () => { $("ok").textContent = "已儲存"; setTimeout(() => $("ok").textContent = "", 1500); });
+  const margin = Math.min(0.20, Math.max(0.01, Number($("margin").value) || D.margin));
+  const last = Math.min(290, Math.max(10, Math.round(Number($("last").value) || D.last)));
+  chrome.storage.sync.set({ addr, amount, margin, last }, () => { $("ok").textContent = "已儲存"; setTimeout(() => $("ok").textContent = "", 1500); });
 };
+chrome.storage.local.get({ journal: {} }, v => { $("cnt").textContent = `目前 ${Object.keys(v.journal).length} 場`; });
+$("export").onclick = () => chrome.storage.local.get({ journal: {} }, v => {
+  const rows = Object.values(v.journal).sort((a, b) => String(a.slug).localeCompare(String(b.slug)));
+  const url = URL.createObjectURL(new Blob(["﻿" + PairLogic.toCSV(rows)], { type: "text/csv" }));
+  const a = document.createElement("a"); a.href = url; a.download = `pair-journal-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+});
