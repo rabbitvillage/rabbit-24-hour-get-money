@@ -13,6 +13,7 @@ from collections import defaultdict
 FEE = 0.07; fee = lambda p: FEE * p * (1 - p)
 MARGIN = float(os.getenv("MARGIN", "0.01")); MIN_SZ = float(os.getenv("MIN_SZ", "60"))
 L1 = float(os.getenv("L1", "0.45")); H1 = float(os.getenv("H1", "0.58"))
+L1S = [float(x) for x in os.getenv("L1S", "0.48,0.46,0.44,0.42,0.40").split(",")]
 
 def load(asset):
     mk = defaultdict(list)
@@ -65,6 +66,20 @@ def main(asset):
         if pre:
             i = rows.index(pre[-1]); p = pre[-1][1]
             res["B pre-open Up"].append(settle("Up", p, win, leg2(rows, i, "Up", p)))
+        # rule E (fish 10-29: 「第一張絕對不可以用限價單」): leg 1 = market buy of the first side whose ask <= L1;
+        # leg 2 = a resting bid on the other side at T = 1 - p1 - fee(p1) - MARGIN (maker, no fee), filled when that side's ask
+        # reaches T, or a market buy of it (taker fee) as soon as the pair is net >= MARGIN -- whichever the book allows first.
+        for l1 in L1S:
+            for i, (t, ua, us, da, ds, _, _) in enumerate(post):
+                pick = ("Up", ua) if ua and us >= MIN_SZ and ua <= l1 else ("Down", da) if da and ds >= MIN_SZ and da <= l1 else None
+                if not pick: continue
+                side, p1 = pick; T = 1 - p1 - fee(p1) - MARGIN; done = None
+                for t2, ua2, us2, da2, ds2, _, _ in post[i + 1:]:
+                    a = da2 if side == "Up" else ua2
+                    if a is not None and a <= T + 1e-9: done = 1 - p1 - T - fee(p1); break          # the resting bid fills at T
+                if done is not None: res[f"E mkt<= {l1:.2f} + bid"].append(("pair", done, p1 + T))
+                else: res[f"E mkt<= {l1:.2f} + bid"].append(settle(side, p1, win, None))
+                break
         # rule C: rising side first
         for i, (t, ua, us, da, ds, _, _) in enumerate(post):
             pick = ("Up", ua) if ua and us >= MIN_SZ and ua >= H1 and ua < 0.9 else ("Down", da) if da and ds >= MIN_SZ and da >= H1 and da < 0.9 else None
