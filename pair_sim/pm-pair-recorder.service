@@ -1,0 +1,17 @@
+[Unit]
+Description=Polymarket 5m opening-phase order-book recorder (read-only, never trades)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/pm-pair
+Environment=ASSETS=btc,eth,sol
+Environment=DATA_DIR=/opt/pm-pair/data
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m pair_sim.recorder
+Restart=always
+RestartSec=5
+Nice=5
+
+[Install]
+WantedBy=multi-user.target
