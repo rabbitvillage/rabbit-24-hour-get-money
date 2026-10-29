@@ -1,6 +1,6 @@
 # FR-20261029-recheck-direction：送單前再檢查改成有方向性——跌 0.02 就不買、漲一格就追一格
 
-- 狀態：active（fish 10-29 15:0x：「立刻加入，這不是策略是避險」；本機 122 個測試通過、主機 Python 3.12 也全過；待部署）
+- 狀態：active（fish 10-29 15:0x：「立刻加入，這不是策略是避險」；本機 122 個測試通過、主機 Python 3.12 也全過。**14:55:05 主機部署 ea74e63**：btc5m-sim／sol／eth／btc15 啟動行 `recheck drop 0.02 chase 0.02 (<= 0.95)`，無錯誤；acct2 未在預設重啟清單內，要另外 `bash btc5m_sim/update_and_restart.sh btc5m-sim@acct2`）
 - 來源：FR-20261027-recheck-before-send 的延伸；10-29 14:09 主帳／acct2 同場分歧的案例
 
 ## 1. 改了什麼
