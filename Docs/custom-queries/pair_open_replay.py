@@ -80,6 +80,19 @@ def main(asset):
                 if done is not None: res[f"E mkt<= {l1:.2f} + bid"].append(("pair", done, p1 + T))
                 else: res[f"E mkt<= {l1:.2f} + bid"].append(settle(side, p1, win, None))
                 break
+        # rule F (fish 10-29: 「只要每一場能夠獲利就撤退，大於零就是賺」): leg 1 = market buy of the first side whose ask <= L1;
+        # then leave at the FIRST moment either exit is net > 0: (a) buy the other side (pair locked), or (b) sell leg 1 at its bid.
+        for l1 in L1S:
+            for i, (t, ua, us, da, ds, ub, db) in enumerate(post):
+                pick = ("Up", ua) if ua and us >= MIN_SZ and ua <= l1 else ("Down", da) if da and ds >= MIN_SZ and da <= l1 else None
+                if not pick: continue
+                side, p1 = pick; out = None
+                for t2, ua2, us2, da2, ds2, ub2, db2 in post[i + 1:]:
+                    oth = da2 if side == "Up" else ua2; mybid = ub2 if side == "Up" else db2
+                    if oth and 1 - p1 - oth - fee(p1) - fee(oth) > 0.001: out = ("pair", 1 - p1 - oth - fee(p1) - fee(oth), p1 + oth); break
+                    if mybid and mybid - p1 - fee(p1) - fee(mybid) > 0.001: out = ("sold", mybid - p1 - fee(p1) - fee(mybid), p1); break
+                res[f"F mkt<= {l1:.2f} exit>0"].append(out or settle(side, p1, win, None))
+                break
         # rule C: rising side first
         for i, (t, ua, us, da, ds, _, _) in enumerate(post):
             pick = ("Up", ua) if ua and us >= MIN_SZ and ua >= H1 and ua < 0.9 else ("Down", da) if da and ds >= MIN_SZ and da >= H1 and da < 0.9 else None
@@ -94,7 +107,7 @@ def main(asset):
         c = defaultdict(int)
         for r in rs: c[r[0]] += 1
         net = sum(r[1] for r in rs); cost = sum(r[2] for r in rs)
-        print(f"   {name:<22} n={len(rs):>3}  paired {c['pair']:>3}  naked won {c['naked_won']:>2}  naked lost {c['naked_lost']:>2}  net/share {net:+.2f}  per $1 {net / cost:+.1%}")
+        print(f"   {name:<22} n={len(rs):>3}  paired {c['pair']:>3}  sold {c['sold']:>3}  naked won {c['naked_won']:>2}  naked lost {c['naked_lost']:>2}  net/share {net:+.2f}  per $1 {net / cost:+.1%}")
 
 if __name__ == "__main__":
     for a in sys.argv[1:] or ["btc"]: main(a)
