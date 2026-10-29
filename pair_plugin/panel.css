@@ -21,3 +21,7 @@
 #pp-panel .pp-msg.ready{background:#1f2937;outline:1px solid #34d399}
 #pp-panel .pp-link{color:#93c5fd;cursor:pointer;text-decoration:underline}
 #pp-flash.ok{background:#047857}
+#pp-panel .pp-mode{display:block;border-radius:8px;padding:6px 8px;margin:4px 0 6px;font-weight:600;cursor:pointer}
+#pp-panel .pp-mode.sim{background:#1e3a8a;color:#dbeafe}
+#pp-panel .pp-mode.live{background:#7f1d1d;color:#fee2e2}
+#pp-panel .pp-mode input{margin-right:6px;vertical-align:middle}

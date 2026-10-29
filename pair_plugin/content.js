@@ -1,4 +1,5 @@
 // 開盤配對助手（人工模式）：在 Polymarket 5 分鐘盤頁面顯示提示面板、擋違規買入、一鍵下單、每場記錄。
+// 練習模式（預設開）：按鍵不碰頁面上的下單按鈕，改用當下真實盤口模擬成交，收盤後照真實結果算損益；不花錢。
 // 插件只在人按鍵或點按鈕時才動作，不會自己下單：
 //   第一張：人決定時機，空白鍵＝市價買較便宜的那邊（U／D 鍵指定邊），金額固定。
 //   第二張：空白鍵＝把對面掛成限價單，同樣股數，價格 = 1 − p1 − 第一張手續費 − 目標利潤（掛單不收手續費）。
@@ -7,7 +8,7 @@
   const L = PairLogic;
   const WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
   const SLUG_RE = /((btc|eth|sol|xrp)-updown-5m-(\d{9,11}))/;
-  const CFG0 = { addr: "", amount: 5, margin: L.DEFAULTS.MARGIN, last: L.DEFAULTS.LAST };
+  const CFG0 = { addr: "", amount: 5, margin: L.DEFAULTS.MARGIN, last: L.DEFAULTS.LAST, practice: true };
   let cfg = Object.assign({}, CFG0);
   let mkt = null;          // {slug, asset, start, tokens:{Up,Down}, conditionId}
   let book = {};           // tokenId -> {asks: Map(price->size), bids: Map}
@@ -15,7 +16,7 @@
   let pos = L.positionFrom([]);
   let pendingUntil = 0;    // 剛送出後的冷卻，避免成交紀錄還沒更新就再按一次
   let lastDecision = null;
-  let store = { settled: {}, legs: {}, journal: {} };   // 結算統計、每場第二張掛單狀態、每場紀錄
+  let store = { settled: {}, legs: {}, journal: {}, sim: {}, settledSim: {} };   // 真實：結算、第二張狀態；每場紀錄；練習：模擬成交與結算
   let hist = [];           // 這一場每秒的兩邊賣價 [s, up, down]
   const RTDS = "wss://ws-live-data.polymarket.com";   // Polymarket 公開 Chainlink 每秒價格（連上會先送最近約 1 分鐘）
   let clWs = null, clPing = null, clPts = [], clLine = null;   // clPts = [[秒, 價格]]；clLine = 自己算的開盤基準線
@@ -23,17 +24,20 @@
   // ---------- 設定與儲存 ----------
   chrome.storage.sync.get(CFG0, v => { cfg = v; });
   chrome.storage.onChanged.addListener((ch, area) => { if (area === "sync") for (const k in ch) cfg[k] = ch[k].newValue; });
-  chrome.storage.local.get({ settled: {}, legs: {}, journal: {} }, v => { store = v; });
+  chrome.storage.local.get({ settled: {}, legs: {}, journal: {}, sim: {}, settledSim: {} }, v => { store = v; });
   let saveT = null;
   function save() { clearTimeout(saveT); saveT = setTimeout(() => chrome.storage.local.set(store), 300); }
-  const stOf = slug => (store.legs[slug] = store.legs[slug] || {});
-  const recOf = () => (store.journal[mkt.slug] = store.journal[mkt.slug] || { slug: mkt.slug, asset: mkt.asset });
+  const practice = () => cfg.practice !== false;
+  const stOf = slug => practice() ? (store.sim[slug] = store.sim[slug] || { trades: [] }) : (store.legs[slug] = store.legs[slug] || {});
+  const settledMap = () => practice() ? store.settledSim : store.settled;
+  const recOf = () => { const k = (practice() ? "sim:" : "") + mkt.slug;
+    return (store.journal[k] = store.journal[k] || { mode: practice() ? "sim" : "live", slug: mkt.slug, asset: mkt.asset }); };
   const lcfg = () => ({ AMOUNT: Number(cfg.amount) || 5, MARGIN: Number(cfg.margin) || L.DEFAULTS.MARGIN, LAST: Number(cfg.last) || L.DEFAULTS.LAST });
 
   // ---------- 面板 ----------
   const panel = document.createElement("div"); panel.id = "pp-panel";
   panel.innerHTML = `<div class="pp-h"><span id="pp-title">開盤配對助手</span><span><span class="pp-t" id="pp-time"></span> <span class="pp-x" id="pp-min">—</span></span></div>
-    <div id="pp-body"><div class="pp-asks"><div class="pp-ask" id="pp-up">Up 賣價<b>—</b></div><div class="pp-ask" id="pp-dn">Down 賣價<b>—</b></div></div>
+    <div id="pp-body"><label class="pp-mode" id="pp-modebox"><input type="checkbox" id="pp-practice"> 練習模式（不花錢、不會下單）</label><div class="pp-asks"><div class="pp-ask" id="pp-up">Up 賣價<b>—</b></div><div class="pp-ask" id="pp-dn">Down 賣價<b>—</b></div></div>
     <div class="pp-msg" id="pp-msg">打開任何一場 BTC／ETH／SOL 5 分鐘盤</div>
     <button id="pp-go" class="pp-go" disabled>空白鍵</button>
     <div class="pp-row" id="pp-line"></div><div class="pp-row" id="pp-pos"></div><div class="pp-row" id="pp-stats"></div>
@@ -42,7 +46,18 @@
   function mount() { if (!document.getElementById("pp-panel")) document.body.appendChild(panel); }
   mount();
   panel.querySelector("#pp-min").onclick = () => { const b = panel.querySelector("#pp-body"); b.style.display = b.style.display === "none" ? "" : "none"; };
-  panel.querySelector("#pp-reset").onclick = () => { if (mkt) { delete stOf(mkt.slug).leg2; save(); flash("已清除第二張掛單紀錄，可以重新按空白鍵掛單", "ok"); } };
+  panel.querySelector("#pp-reset").onclick = () => {
+    if (!mkt) return; const st = stOf(mkt.slug);
+    if (practice() && st.leg2 && st.leg2.done) return flash("練習的第二張已經成交，不能取消");
+    delete st.leg2; save(); flash(practice() ? "練習：已取消第二張掛單" : "已清除第二張掛單紀錄，可以重新按空白鍵掛單", "ok");
+  };
+  const modeBox = panel.querySelector("#pp-practice");
+  modeBox.addEventListener("change", () => {
+    const on = modeBox.checked; modeBox.blur();
+    if (!on && !confirm("關掉練習模式後，空白鍵會真的下單、真的花錢。確定？")) { modeBox.checked = true; return; }
+    cfg.practice = on; chrome.storage.sync.set({ practice: on }); pos = L.positionFrom([]); loadTrades();
+    flash(on ? "練習模式：不會下單" : "真實模式：空白鍵會真的下單", on ? "ok" : "");
+  });
   (function drag() {
     const h = panel.querySelector(".pp-h"); let dx = 0, dy = 0, on = false;
     h.addEventListener("mousedown", e => { on = true; dx = e.clientX - panel.offsetLeft; dy = e.clientY - panel.offsetTop; });
@@ -119,29 +134,32 @@
     return { slug, asset: slug.split("-")[0].toUpperCase(), start: Number(slug.split("-").pop()), conditionId: m.conditionId,
              tokens: { Up: String(toks[outs.indexOf("Up")]), Down: String(toks[outs.indexOf("Down")]) } };
   }
+  function posToJournal() {                         // 把成交（真實或練習）寫進這一場的紀錄
+    if (!mkt || !pos.first) return;
+    const rec = recOf(), s1 = pos.first, s2 = L.other(s1);
+    Object.assign(rec, { leg1_side: s1, leg1_price: pos[s1].avg, leg1_shares: pos[s1].shares, leg1_s: pos[s1].firstTs - mkt.start,
+                         leg2_filled_shares: pos[s2].shares, leg2_fill_s: pos[s2].lastTs != null ? pos[s2].lastTs - mkt.start : null });
+    save();
+  }
   async function loadTrades() {
-    if (!mkt || !cfg.addr) return;
+    if (!mkt) return;
+    if (practice()) { pos = L.positionFrom(stOf(mkt.slug).trades); posToJournal(); return; }
+    if (!cfg.addr) return;
     try {
       const r = await fetch(`https://data-api.polymarket.com/trades?user=${cfg.addr}&market=${mkt.conditionId}&limit=100&takerOnly=false`);
-      const d = await r.json(); if (!Array.isArray(d)) return;
-      pos = L.positionFrom(d);
-      if (pos.first) {                                   // 把真實成交寫進這一場的紀錄
-        const rec = recOf(), s1 = pos.first, s2 = L.other(s1);
-        Object.assign(rec, { leg1_side: s1, leg1_price: pos[s1].avg, leg1_shares: pos[s1].shares, leg1_s: pos[s1].firstTs - mkt.start,
-                             leg2_filled_shares: pos[s2].shares, leg2_fill_s: pos[s2].lastTs != null ? pos[s2].lastTs - mkt.start : null });
-        save();
-      }
+      const d = await r.json(); if (!Array.isArray(d) || practice()) return;
+      pos = L.positionFrom(d); posToJournal();
     } catch (e) {}
   }
   async function checkSettled() {
-    if (!mkt || store.settled[mkt.slug] || (pos.Up.shares + pos.Down.shares) === 0) return;
+    if (!mkt || settledMap()[mkt.slug] || (pos.Up.shares + pos.Down.shares) === 0) return;
     if (Date.now() / 1000 < mkt.start + 300 + 20) return;
     try {
       const d = await (await fetch(`https://gamma-api.polymarket.com/events?slug=${mkt.slug}`)).json();
       const m = d[0].markets[0]; const pr = JSON.parse(m.outcomePrices || "[]"); const outs = JSON.parse(m.outcomes);
       const i = pr.findIndex(x => Number(x) >= 0.99); if (i < 0) return;
-      const res = L.settle(pos, outs[i], !!stOf(mkt.slug).leg2);
-      store.settled[mkt.slug] = Object.assign({ winner: outs[i], day: new Date().toISOString().slice(0, 10), up: pos.Up.shares, down: pos.Down.shares }, res);
+      const st = stOf(mkt.slug), res = L.settle(pos, outs[i], !!(st.leg2 && !st.leg2.taker));
+      settledMap()[mkt.slug] = Object.assign({ winner: outs[i], day: new Date().toISOString().slice(0, 10), up: pos.Up.shares, down: pos.Down.shares }, res);
       Object.assign(recOf(), { winner: outs[i], paired: res.paired ? 1 : 0, pnl: res.pnl });
       fillLine(recOf(), d[0].eventMetadata);
       save();
@@ -159,12 +177,18 @@
   async function backfill() {
     const now = Date.now() / 1000;
     for (const rec of Object.values(store.journal)) {
-      if (rec.line_src === "official" && rec.winner) continue;
+      if (rec.line_src === "official" && rec.winner && (rec.mode !== "sim" || store.settledSim[rec.slug])) continue;
       const start = Number(String(rec.slug).split("-").pop()); if (!(now > start + 320) || now > start + 86400 * 3) continue;
       try {
         const d = await (await fetch(`https://gamma-api.polymarket.com/events?slug=${rec.slug}`)).json(); if (!d || !d.length) continue;
         fillLine(rec, d[0].eventMetadata);
         if (!rec.winner) { const m = d[0].markets[0]; const pr = JSON.parse(m.outcomePrices || "[]"); const i = pr.findIndex(x => Number(x) >= 0.99); if (i >= 0) rec.winner = JSON.parse(m.outcomes)[i]; }
+        const sim = store.sim[rec.slug];                 // 練習的場次：成交都存在本機，離開頁面也能結算
+        if (rec.mode === "sim" && rec.winner && sim && sim.trades.length && !store.settledSim[rec.slug]) {
+          const ps = L.positionFrom(sim.trades), res = L.settle(ps, rec.winner, !!(sim.leg2 && !sim.leg2.taker));
+          store.settledSim[rec.slug] = Object.assign({ winner: rec.winner, day: new Date(start * 1000).toISOString().slice(0, 10), up: ps.Up.shares, down: ps.Down.shares }, res);
+          Object.assign(rec, { paired: res.paired ? 1 : 0, pnl: res.pnl });
+        }
         save();
       } catch (e) {}
     }
@@ -225,9 +249,18 @@
   }
 
   // ---------- 擋違規 ----------
+  function recordClick(side) {                        // 記下按下第一張那一刻的盤面，之後分析進場判斷
+    const s = Date.now() / 1000 - mkt.start, a = asksNow();
+    const path = hist.filter(h => h[0] >= s - 60).filter((h, i) => i % 2 === 0).map(h => `${h[0]}:${h[1] ?? ""}/${h[2] ?? ""}`).join(";");
+    const cl = clNow(), dd = L.distance(cl, clLine, side, s);
+    Object.assign(recOf(), { click_s: s, click_side: side, click_up_ask: a.Up, click_dn_ask: a.Down, path60: path, cl_click: cl },
+                  clLine != null ? { line: clLine, line_src: "live" } : {}, dd ? { dist_usd: dd.usd, dist_bps: dd.bps, dist_z: dd.z } : {});
+    save();
+  }
   function guard(e) {
     if (!mkt) return; const bb = classify(e.target); if (!bb || bb.sell) return;
     const block = why => { e.preventDefault(); e.stopImmediatePropagation(); flash("擋下：" + why); warn("擋下：" + why); };
+    if (practice()) return block("練習模式中不會真的下單；要真的下單，先在面板上關掉練習模式");
     if (!cfg.addr) return block("先在插件設定填你的錢包地址，插件才知道你買了什麼");
     if (Date.now() < pendingUntil) return block("上一張剛送出，等成交紀錄更新（約 5 秒）");
     const d = lastDecision; if (!d) return block("還沒收到盤口");
@@ -247,14 +280,7 @@
       if (!(max > 0)) return block(d.phase === "second" ? "第二張請用限價掛單（空白鍵）；對面現在的價格吃單不賺錢" : d.msg);
       if (bb.amount == null) return block("讀不到金額，請確認金額欄有填");
       if (bb.amount > max + 1e-9) return block(`金額 $${bb.amount} 超過上限 $${max.toFixed(2)}，不准放大`);
-      if (d.phase === "first") {                            // 記下按下第一張那一刻的盤面，之後分析進場判斷
-        const s = Date.now() / 1000 - mkt.start, a = asksNow();
-        const path = hist.filter(h => h[0] >= s - 60).filter((h, i) => i % 2 === 0).map(h => `${h[0]}:${h[1] ?? ""}/${h[2] ?? ""}`).join(";");
-        const cl = clNow(), dd = L.distance(cl, clLine, bb.side, s);
-        Object.assign(recOf(), { click_s: s, click_side: bb.side, click_up_ask: a.Up, click_dn_ask: a.Down, path60: path, cl_click: cl },
-                      clLine != null ? { line: clLine, line_src: "live" } : {}, dd ? { dist_usd: dd.usd, dist_bps: dd.bps, dist_z: dd.z } : {});
-        save();
-      }
+      if (d.phase === "first") recordClick(bb.side);
       warn(`已放行：市價買 ${bb.side} $${bb.amount}`);
     }
     pendingUntil = Date.now() + 5000;
@@ -265,16 +291,54 @@
     if (a && a.tagName === "INPUT") { e.preventDefault(); e.stopImmediatePropagation(); flash("請用按鈕或空白鍵下單（輸入框裡的 Enter 已停用）"); }
   }, true);
 
+  // ---------- 練習模式：照真實盤口模擬成交 ----------
+  const askList = side => { const b = book[mkt.tokens[side]]; return b ? [...b.asks].map(([p, z]) => [p, z]) : []; };
+  function simExec(sg) {
+    const st = stOf(mkt.slug), now = Date.now() / 1000, s = now - mkt.start;
+    if (sg.kind === "market") {
+      const f = L.fillMarket(askList(sg.side), sg.amount); if (!f) return flash("練習：盤口不夠深，吃不到 $" + sg.amount);
+      recordClick(sg.side);
+      st.trades.push({ side: "BUY", outcome: sg.side, price: f.price, size: f.shares, timestamp: now });
+      flash(`練習：市價買 ${sg.side} ${f.shares.toFixed(2)} 股，均價 ${f.price.toFixed(3)}`, "ok");
+    } else {
+      const a = best(mkt.tokens[sg.side], "ask");
+      st.leg2 = { price: sg.price, shares: sg.shares, s };
+      Object.assign(recOf(), { leg2_price: sg.price, leg2_shares: sg.shares, leg2_placed_s: s, leg2_taker: 0 });
+      if (a != null && a <= sg.price + 1e-9) {             // 掛單價已高於對面賣價：立刻吃單成交，要付手續費
+        const f = L.fillShares(askList(sg.side), sg.shares, sg.price);
+        if (f) {
+          st.trades.push({ side: "BUY", outcome: sg.side, price: f.price, size: f.shares, timestamp: now });
+          Object.assign(st.leg2, { taker: true, done: true }); Object.assign(recOf(), { leg2_taker: 1, leg2_fill_strict: 1 });
+          flash(`練習：第二張立刻吃單成交 ${f.shares.toFixed(2)} 股 @${f.price.toFixed(3)}（收手續費）`, "ok");
+        }
+      } else flash(`練習：掛 ${sg.side} 限價 ${sg.price.toFixed(2)} × ${sg.shares.toFixed(2)} 股，等對面跌下來`, "ok");
+    }
+    save(); pos = L.positionFrom(st.trades); posToJournal();
+  }
+  // 練習的掛單：對面賣價跌到掛單價就算成交（和回放同算法）；「嚴格成交」= 跌破掛單價 1 分以上，比較保守
+  function simTick(s) {
+    if (!practice() || !mkt || s >= 300) return;
+    const st = stOf(mkt.slug), lg = st.leg2; if (!lg || lg.done) return;
+    const side = L.other(pos.first || ""), a = side ? best(mkt.tokens[side], "ask") : null;
+    if (a != null && a <= lg.price - 0.01 + 1e-9) lg.strict = 1;
+    if (a == null || a > lg.price + 1e-9) return;
+    st.trades.push({ side: "BUY", outcome: side, price: lg.price, size: lg.shares, timestamp: Date.now() / 1000 });
+    lg.done = true; recOf().leg2_fill_strict = lg.strict ? 1 : 0;
+    save(); pos = L.positionFrom(st.trades); posToJournal();
+    flash(`練習：第二張成交 ${side} ${lg.shares.toFixed(2)} 股 @${lg.price.toFixed(2)}，本場成對`, "ok");
+  }
+
   // ---------- 一鍵下單（人按了才執行；送出時一樣經過上面的檢查）----------
   let busy = false;
   async function quickBuy(force) {
     if (busy || !mkt) return; const d = lastDecision;
-    if (!cfg.addr) return flash("先在插件設定填你的錢包地址");
+    if (!practice() && !cfg.addr) return flash("先在插件設定填你的錢包地址");
     if (!d) return flash("還沒收到盤口");
-    if (Date.now() < pendingUntil) return flash("上一張剛送出，等成交紀錄更新");
+    if (!practice() && Date.now() < pendingUntil) return flash("上一張剛送出，等成交紀錄更新");
     if (force && d.phase !== "first") return flash("U／D 只用在第一張；第二張按空白鍵");
     const sg = force ? (d.allow[force] ? { kind: "market", side: force, amount: d.market[force] } : null) : d.suggest;
     if (!sg) return flash("現在不能下單：" + d.msg);
+    if (practice()) return simExec(sg);
     busy = true;
     try {
       const buyTab = radios(/^(買入|Buy)$/i)[0]; if (buyTab && !isOn(buyTab)) { buyTab.click(); await sleep(120); }
@@ -301,7 +365,8 @@
   panel.querySelector("#pp-go").onclick = e => { e.preventDefault(); e.stopPropagation(); quickBuy(); };
   document.addEventListener("keydown", e => {
     if (!mkt || e.repeat) return;
-    const a = document.activeElement; if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.isContentEditable)) return;
+    const a = document.activeElement;
+    if (a && ((a.tagName === "INPUT" && !/^(checkbox|radio|button)$/i.test(a.type)) || a.tagName === "TEXTAREA" || a.isContentEditable)) return;
     const f = e.code === "Space" ? null : e.code === "KeyU" ? "Up" : e.code === "KeyD" ? "Down" : undefined;
     if (f === undefined || e.metaKey || e.ctrlKey || e.altKey) return;
     e.preventDefault(); e.stopImmediatePropagation(); quickBuy(f);
@@ -323,6 +388,7 @@
     if (!mkt) { $("#pp-title").textContent = "開盤配對助手"; $("#pp-time").textContent = ""; $("#pp-msg").textContent = "打開任何一場 BTC／ETH／SOL 5 分鐘盤"; $("#pp-msg").className = "pp-msg"; $("#pp-go").disabled = true; lastDecision = null; return; }
     const s = Date.now() / 1000 - mkt.start, asks = asksNow();
     const si = Math.floor(s); if (!hist.length || hist[hist.length - 1][0] !== si) { hist.push([si, asks.Up, asks.Down]); if (hist.length > 400) hist.shift(); }
+    simTick(s);
     const st = stOf(mkt.slug), d = L.decide(s, asks, pos, lcfg(), st);
     lastDecision = d;
     const hh = new Date(mkt.start * 1000); $("#pp-title").textContent = `${mkt.asset} ${String(hh.getHours()).padStart(2, "0")}:${String(hh.getMinutes()).padStart(2, "0")} 場`;
@@ -330,21 +396,26 @@
     const hot = x => d.suggest && d.suggest.side === x;
     $("#pp-up").innerHTML = `Up 賣價<b>${asks.Up == null ? "—" : asks.Up.toFixed(2)}</b>`; $("#pp-up").className = "pp-ask" + (hot("Up") ? " hot" : "");
     $("#pp-dn").innerHTML = `Down 賣價<b>${asks.Down == null ? "—" : asks.Down.toFixed(2)}</b>`; $("#pp-dn").className = "pp-ask" + (hot("Down") ? " hot" : "");
-    $("#pp-msg").textContent = cfg.addr ? d.msg : "先到插件設定填你的錢包地址（右鍵插件圖示 → 選項）";
-    $("#pp-msg").className = "pp-msg " + (cfg.addr ? d.level : "stop");
-    const go = $("#pp-go"), sg = cfg.addr ? d.suggest : null;
+    const ready = practice() || !!cfg.addr, P = practice() ? "練習｜" : "";
+    $("#pp-msg").textContent = ready ? P + d.msg : "先到插件設定填你的錢包地址（右鍵插件圖示 → 選項）";
+    $("#pp-msg").className = "pp-msg " + (ready ? d.level : "stop");
+    const go = $("#pp-go"), sg = ready ? d.suggest : null;
     go.disabled = !sg;
-    go.textContent = !sg ? "現在沒有可以做的" : sg.kind === "market" ? `空白鍵：市價買 ${sg.side} $${sg.amount}（U／D 指定邊）` : `空白鍵：掛 ${sg.side} 限價 ${sg.price.toFixed(2)} × ${sg.shares.toFixed(2)} 股`;
+    go.textContent = !sg ? "現在沒有可以做的" : P + (sg.kind === "market" ? `空白鍵：市價買 ${sg.side} $${sg.amount}（U／D 指定邊）` : `空白鍵：掛 ${sg.side} 限價 ${sg.price.toFixed(2)} × ${sg.shares.toFixed(2)} 股`);
+    if (document.activeElement !== modeBox) modeBox.checked = practice();
+    $("#pp-modebox").className = "pp-mode " + (practice() ? "sim" : "live");
     $("#pp-reset").style.display = d.phase === "waiting" ? "" : "none";
     const cl = clNow(), dl = L.distance(cl, clLine, "Up", s);
+    $("#pp-reset").textContent = practice() ? "取消練習的第二張掛單" : "第二張重掛（先在頁面上取消舊掛單）";
     $("#pp-line").textContent = cl == null ? "幣價：連線中…" : clLine == null ? `幣價 ${cl.toFixed(2)}｜開盤線：要在開盤前 1 分鐘內打開頁面才算得出來（收盤後紀錄會補官方值）`
       : `幣價 ${cl.toFixed(2)}｜離開盤線 ${dl.usd >= 0 ? "+" : ""}${dl.usd.toFixed(2)}（${dl.usd >= 0 ? "偏 Up" : "偏 Down"}，標準化 ${dl.z.toFixed(2)}）`;
     $("#pp-pos").textContent = `部位：Up ${pos.Up.shares.toFixed(2)} 股${pos.Up.avg ? " @" + pos.Up.avg.toFixed(3) : ""}｜Down ${pos.Down.shares.toFixed(2)} 股${pos.Down.avg ? " @" + pos.Down.avg.toFixed(3) : ""}`;
-    const today = new Date().toISOString().slice(0, 10); const rs = Object.values(store.settled).filter(r => r.day === today);
+    const today = new Date().toISOString().slice(0, 10); const rs = Object.values(settledMap()).filter(r => r.day === today);
+    const tag = practice() ? "今日練習" : "今日真實";
     if (rs.length) {
       const pnl = rs.reduce((a, r) => a + r.pnl, 0), paired = rs.filter(r => r.paired).length;
-      $("#pp-stats").textContent = `今日：${rs.length} 場，成對 ${paired}、沒補到 ${rs.length - paired}，損益 ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`;
-    } else $("#pp-stats").textContent = "今日：尚無結算";
+      $("#pp-stats").textContent = `${tag}：${rs.length} 場，成對 ${paired}、沒補到 ${rs.length - paired}，損益 ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`;
+    } else $("#pp-stats").textContent = `${tag}：尚無結算`;
   }
   setInterval(() => { if (location.pathname !== lastPath) onRoute(); render(); }, 250);
   setInterval(() => { loadTrades(); checkSettled(); }, 2000);

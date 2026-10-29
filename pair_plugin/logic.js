@@ -116,16 +116,30 @@ var PairLogic = (function () {
     let a = 0; for (const v of seen.values()) a += v; return a / seen.size;
   }
 
+  // 練習模式：照盤口模擬市價成交。asks = [[價格, 股數], ...]（任意順序）。
+  // byAmount：花 amount 美元能買到幾股、平均價；byShares：買 shares 股（只吃 ≤ maxPrice 的掛單）。吃不到回傳 null。
+  function fillMarket(asks, amount) {
+    const lv = asks.filter(a => a[1] > 0).sort((a, b) => a[0] - b[0]); let left = amount, sh = 0, cost = 0;
+    for (const [p, sz] of lv) { const take = Math.min(sz, left / p); sh += take; cost += take * p; left -= take * p; if (left <= 1e-9) break; }
+    return sh > 0 && left <= 1e-6 ? { price: cost / sh, shares: sh } : null;
+  }
+  function fillShares(asks, shares, maxPrice) {
+    const lv = asks.filter(a => a[1] > 0 && a[0] <= maxPrice + 1e-9).sort((a, b) => a[0] - b[0]); let left = shares, cost = 0;
+    for (const [p, sz] of lv) { const take = Math.min(sz, left); cost += take * p; left -= take; if (left <= 1e-9) break; }
+    const got = shares - Math.max(left, 0);
+    return got > 0 ? { price: cost / got, shares: got } : null;
+  }
+
   // 每場紀錄匯出成 CSV（給之後分析 fish 的進場判斷）
-  const COLS = ["slug", "asset", "leg1_side", "leg1_price", "leg1_shares", "leg1_s", "click_s", "click_side", "click_up_ask", "click_dn_ask",
+  const COLS = ["mode", "slug", "asset", "leg1_side", "leg1_price", "leg1_shares", "leg1_s", "click_s", "click_side", "click_up_ask", "click_dn_ask",
                 "cl_click", "line", "line_src", "dist_usd", "dist_bps", "dist_z", "path60",
-                "leg2_price", "leg2_shares", "leg2_placed_s", "leg2_filled_shares", "leg2_fill_s", "winner", "paired", "pnl"];
+                "leg2_price", "leg2_shares", "leg2_placed_s", "leg2_taker", "leg2_filled_shares", "leg2_fill_s", "leg2_fill_strict", "winner", "paired", "pnl"];
   function toCSV(records) {
     const esc = v => { if (v == null) return ""; const s = typeof v === "number" ? String(Math.round(v * 10000) / 10000) : String(v);
                        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
     return [COLS.join(",")].concat(records.map(r => COLS.map(c => esc(r[c])).join(","))).join("\n") + "\n";
   }
 
-  return { FEE_RATE, DEFAULTS, EPS_SH, fee, pairProfit, makerProfit, leg2Price, leg2Cap, positionFrom, decide, settle, other, toCSV, COLS, distance, lineFrom };
+  return { FEE_RATE, DEFAULTS, EPS_SH, fee, pairProfit, makerProfit, leg2Price, leg2Cap, positionFrom, decide, settle, other, toCSV, COLS, distance, lineFrom, fillMarket, fillShares };
 })();
 if (typeof module !== "undefined") module.exports = PairLogic;

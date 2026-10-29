@@ -53,10 +53,10 @@ test("partial fills keep waiting; equal shares finish the game; settlement skips
 test("unpaired single leg settles to all-or-nothing; journal exports as CSV", () => {
   const pos = L.positionFrom([buy("Down", 0.40, 12.5, 1)]);
   assert.ok(Math.abs(L.settle(pos, "Up", true).pnl - (-5 - 12.5 * L.fee(0.40))) < 1e-9);
-  const csv = L.toCSV([{ slug: "btc-updown-5m-1", asset: "BTC", leg1_side: "Down", leg1_price: 0.4, path60: "1:0.5/0.5;3:0.4/0.6" }]);
+  const csv = L.toCSV([{ mode: "sim", slug: "btc-updown-5m-1", asset: "BTC", leg1_side: "Down", leg1_price: 0.4, path60: "1:0.5/0.5;3:0.4/0.6" }]);
   const [head, row] = csv.trim().split("\n");
   assert.strictEqual(head.split(",").length, L.COLS.length);
-  assert.ok(row.startsWith("btc-updown-5m-1,BTC,Down,0.4,"));
+  assert.ok(row.startsWith("sim,btc-updown-5m-1,BTC,Down,0.4,"));
 });
 
 test("opening line = mean of the 60 s before the open; distance is signed toward the bought side", () => {
@@ -71,4 +71,15 @@ test("opening line = mean of the 60 s before the open; distance is signed toward
   assert.ok(Math.abs(up.z - Math.abs(up.bps) / 15) < 1e-9);                       // √(300 − 75) = 15
   assert.strictEqual(L.distance(null, 100, "Up", 10), null);
   assert.strictEqual(L.distance(100, null, "Up", 10), null);
+});
+
+test("practice fills walk the real book: dollars for leg 1, shares capped at the limit for a crossing leg 2", () => {
+  const asks = [[0.42, 5], [0.40, 10], [0.45, 100]];
+  const f = L.fillMarket(asks, 5);                       // 10 @0.40 = $4, then $1 / 0.42 = 2.381 @0.42
+  assert.ok(Math.abs(f.shares - (10 + 1 / 0.42)) < 1e-9 && Math.abs(f.price - 5 / f.shares) < 1e-9);
+  assert.strictEqual(L.fillMarket([[0.40, 2]], 5), null);  // not enough on the book
+  const g = L.fillShares(asks, 12, 0.42);                // 10 @0.40 + 2 @0.42
+  assert.ok(Math.abs(g.shares - 12) < 1e-9 && Math.abs(g.price - (4 + 0.84) / 12) < 1e-9);
+  const h = L.fillShares(asks, 20, 0.42); assert.ok(Math.abs(h.shares - 15) < 1e-9);   // only 15 at or under the limit
+  assert.strictEqual(L.fillShares(asks, 5, 0.39), null);
 });
