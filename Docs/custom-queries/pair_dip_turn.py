@@ -41,20 +41,21 @@ def run(post, win, drop, up, look, w, margin):
         if oth is not None and 1 - p1 - oth - fee(p1) - fee(oth) > margin: return "pair", 1 - p1 - oth - fee(p1) - fee(oth), p1 + oth
     return ("held_won" if side == win else "held_lost"), ((1 - p1) if side == win else -p1) - fee(p1), p1
 
-print(f"{len(mk)} complete markets")
-print(f"{'drop':>5}{'turn':>6}{'look':>6}{'win':>6}{'margin':>7} | {'n':>4} {'pair':>5} {'lost':>5} | {'net/sh':>7} {'per $1':>7}")
-res = []
-for drop, up, look, w, margin in itertools.product((0.06, 0.10, 0.15), (0.01, 0.02, 0.03), (10, 20), (60, 120, 290), (0.005, 0.02)):
-    c = defaultdict(int); pnl = cost = 0.0
-    for s, (post, win) in mk.items():
-        r = run(post, win, drop, up, look, w, margin)
-        if not r: continue
-        c[r[0]] += 1; pnl += r[1]; cost += r[2]
-    n = sum(c.values())
-    if n: res.append((pnl / cost, drop, up, look, w, margin, n, c, pnl))
-res.sort(reverse=True)
-for row in res[:15] + [None] + res[-5:]:
-    if row is None: print("   ..."); continue
-    r, drop, up, look, w, margin, n, c, pnl = row
-    print(f"{drop:>5.2f}{up:>6.2f}{look:>5}s{w:>5}s{margin:>7.3f} | {n:>4} {c['pair']:>5} {c['held_lost']:>5} | {pnl:>+7.2f} {r:>+7.1%}")
-pos = sum(1 for x in res if x[0] > 0); print(f"{pos}/{len(res)} parameter sets positive")
+if __name__ == "__main__":
+    print(f"{len(mk)} complete markets")
+    print(f"{'drop':>5}{'turn':>6}{'look':>6}{'win':>6}{'margin':>7} | {'n':>4} {'pair':>5} {'lost':>5} | {'net/sh':>7} {'per $1':>7}")
+    res = []
+    for drop, up, look, w, margin in itertools.product((0.06, 0.10, 0.15), (0.01, 0.02, 0.03), (10, 20), (60, 120, 290), (0.005, 0.02)):
+        c = defaultdict(int); pnl = cost = 0.0
+        for s, (post, win) in mk.items():
+            r = run(post, win, drop, up, look, w, margin)
+            if not r: continue
+            c[r[0]] += 1; pnl += r[1]; cost += r[2]
+        n = sum(c.values())
+        if n: res.append((pnl / cost, drop, up, look, w, margin, n, c, pnl))
+    res.sort(reverse=True)
+    for row in res[:15] + [None] + res[-5:]:
+        if row is None: print("   ..."); continue
+        r, drop, up, look, w, margin, n, c, pnl = row
+        print(f"{drop:>5.2f}{up:>6.2f}{look:>5}s{w:>5}s{margin:>7.3f} | {n:>4} {c['pair']:>5} {c['held_lost']:>5} | {pnl:>+7.2f} {r:>+7.1%}")
+    pos = sum(1 for x in res if x[0] > 0); print(f"{pos}/{len(res)} parameter sets positive")
