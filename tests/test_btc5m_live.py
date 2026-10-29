@@ -116,11 +116,13 @@ class DryAndSettle(unittest.TestCase):
     def test_dry_run_also_rechecks_the_book_before_sending(self):
         row = live._submit("w60_m95_s20", market(), 1, 0.84, 36.6, mode="dry", book_fn=lambda: 0.70)
         self.assertEqual(row["status"], "aborted"); self.assertIn("side collapsing", row["msg"])
-        row = live._submit("w60_m95_s20", market("btc-updown-5m-2"), 1, 0.84, 36.6, mode="dry", book_fn=lambda: 0.82)
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-2"), 1, 0.84, 36.6, mode="dry", book_fn=lambda: 0.83)   # 1c dip: fine
         self.assertEqual(row["status"], "dry")
-        row = live._submit("w60_m95_s20", market("btc-updown-5m-3"), 1, 0.82, 36.6, mode="dry", book_fn=lambda: 0.79)   # a 3-cent dip, but under the 0.80 floor
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-4"), 1, 0.84, 36.6, mode="dry", book_fn=lambda: 0.82)   # 2c dip: 10-29 threshold
+        self.assertEqual(row["status"], "aborted"); self.assertIn("side collapsing", row["msg"])
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-3"), 1, 0.80, 36.6, mode="dry", book_fn=lambda: 0.79)   # a 1-cent dip, but under the 0.80 floor
         self.assertEqual(row["status"], "aborted"); self.assertIn("under floor 0.8", row["msg"])
-        self.assertEqual([r["status"] for r in self.rows("live_orders.csv")], ["aborted", "dry", "aborted"])
+        self.assertEqual([r["status"] for r in self.rows("live_orders.csv")], ["aborted", "dry", "aborted", "aborted"])
 
     def test_submit_skips_an_ask_under_the_executor_floor(self):
         row = live._submit("w60_m95_s20", market("btc-updown-5m-7"), 1, 0.70, 36.6, mode="dry")
@@ -239,7 +241,7 @@ class FakPartialFill(unittest.TestCase):
         t = list(csv.DictReader(open(os.path.join(self.d.name, "live_timing.csv")))); self.assertEqual(t[-1]["status"], "aborted")
         self.assertFalse(live.guard("w45_m95_s20", market()["slug"], 0.86, 5, mode="live", outcome="Down")[1].startswith("market already"))  # an aborted order holds no market slot
         # a dip smaller than RECHECK_DROP, or no ws book at all, does not get in the way
-        row = live._submit("w60_m95_s20", market("btc-updown-5m-2"), 1, 0.84, 36.6, mode="live", book_fn=lambda: 0.80)
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-2"), 1, 0.84, 36.6, mode="live", book_fn=lambda: 0.83)
         self.assertEqual(row["status"], "filled"); self.assertEqual(len(posted), 1)
         row = live._submit("w60_m95_s20", market("btc-updown-5m-3"), 1, 0.84, 36.6, mode="live", book_fn=lambda: None)
         self.assertEqual(row["status"], "filled"); self.assertEqual(len(posted), 2)
@@ -252,7 +254,35 @@ class FakPartialFill(unittest.TestCase):
         self.assertEqual(row["status"], "aborted"); self.assertIn("rose 0.9 -> 0.95 above limit 0.91", row["msg"]); self.assertEqual(signed, [])
         live.RECHECK_DROP = 0                                                                              # switched off: sent as before
         row = live._submit("w60_m95_s20", market("btc-updown-5m-2"), 0, 0.90, 50.0, mode="live", book_fn=lambda: 0.40)
-        self.assertEqual(row["status"], "filled"); live.RECHECK_DROP = 0.05
+        self.assertEqual(row["status"], "filled"); live.RECHECK_DROP = 0.02
+
+    def test_chase_one_step_when_the_side_ran_up(self):
+        """10-29 14:09: decided on Up at 0.90 (limit 0.92), the ask was 0.93 by the time the order was signed -> aborted.
+        15 of the 16 such aborts would have won: now a rise of up to RECHECK_CHASE above the limit is chased (re-priced)."""
+        signed = []; posted = []
+        live.worker = lambda op, payload=None, timeout=8: signed.append(payload["idempotencyKey"]) or (200, {"ok": True, "signature": "0xsig", "digest": "0xd"})
+        live.clob_request = lambda m, p, body=None, headers=None, _retry=True: posted.append(json.loads(body)["order"]) or (200, {"success": True, "status": "matched", "orderID": "o6", "makingAmount": "4.75", "takingAmount": "5"})
+        # ran up before signing: re-priced to 0.93 + SLIP, signed once, sent
+        row = live._submit("w60_m95_s20", market(), 0, 0.90, 58.2, mode="live", book_fn=lambda: 0.93)
+        self.assertEqual((row["status"], row["price"]), ("filled", 0.94)); self.assertIn("chased 0.9 -> 0.93 before sign", row["msg"])
+        self.assertEqual(len(signed), 1); self.assertEqual(float(posted[-1]["makerAmount"]) / float(posted[-1]["takerAmount"]), 0.94)
+        # ran up after signing: re-signed once under a new idempotency key, then sent
+        seen = iter([0.90, 0.93, 0.93])
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-2"), 0, 0.90, 58.2, mode="live", book_fn=lambda: next(seen))
+        self.assertEqual((row["status"], row["price"]), ("filled", 0.94)); self.assertIn("after sign", row["msg"])
+        self.assertEqual(signed[-2:], ["w60_m95_s20:btc-updown-5m-2", "w60_m95_s20:btc-updown-5m-2:chase"])
+        # kept running after the chase: let it go
+        seen = iter([0.90, 0.93, 0.95])
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-3"), 0, 0.90, 58.2, mode="live", book_fn=lambda: next(seen))
+        self.assertEqual(row["status"], "aborted"); self.assertIn("rose again", row["msg"])
+        # too far (beyond the chase) or above the strategy cap: not chased
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-4"), 0, 0.90, 58.2, mode="live", book_fn=lambda: 0.95)
+        self.assertEqual(row["status"], "aborted"); self.assertIn("not sending", row["msg"])
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-5"), 0, 0.94, 58.2, mode="live", book_fn=lambda: 0.96)
+        self.assertEqual(row["status"], "aborted")
+        live.RECHECK_CHASE = 0                                                                            # switched off: old behaviour
+        row = live._submit("w60_m95_s20", market("btc-updown-5m-6"), 0, 0.90, 58.2, mode="live", book_fn=lambda: 0.93)
+        self.assertEqual(row["status"], "aborted"); live.RECHECK_CHASE = 0.02
 
 
 class Recovery(unittest.TestCase):

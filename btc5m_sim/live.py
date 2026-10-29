@@ -176,7 +176,14 @@ SLIP = float(os.getenv("LIVE_SLIP", "0.01"))                 # pay up to ask + S
 # the 485 filled at the ask or above lost 10 (+$92.7). So right before signing and again right before the POST the submit
 # thread re-reads the websocket book (no network): if the side's best ask has fallen by RECHECK_DROP or more under the ask
 # the rule decided on, or has risen above the limit, the order is not sent (status "aborted"). 0 = off.
-RECHECK_DROP = float(os.getenv("LIVE_RECHECK_DROP", "0.05"))
+# 2026-10-29 (fish: 「這不是策略，是避險」): the direction of the move during the sign window is itself a signal. 661 real fills
+# by (fill - ask seen): rose 1-2c 203 fills lost 3%; unchanged 282 lost 1.4%; fell 0.01-0.05 122 fills lost 10% (net
+# negative); fell >= 0.05 lost 26%. So the drop threshold tightens to 0.02, and a side that RAN UP is chased one step
+# instead of abandoned: when the ask rose above the limit by at most RECHECK_CHASE and is still <= CHASE_MAX, the order is
+# re-priced at the new ask + SLIP (re-signed once if it happened after signing). Of 16 "rose above limit" aborts, 15 won.
+RECHECK_DROP = float(os.getenv("LIVE_RECHECK_DROP", "0.02"))
+RECHECK_CHASE = float(os.getenv("LIVE_RECHECK_CHASE", "0.02"))   # chase a rise of up to this much above the limit; 0 = never chase
+CHASE_MAX = float(os.getenv("LIVE_CHASE_MAX", "0.95"))           # never chase above the strategy's price cap
 RECHECK_FLOOR = float(os.getenv("LIVE_RECHECK_FLOOR", "0.80"))   # fish 10-27: 0.80-0.97 is acceptable, 0.5x is not -> never send under this
 # Executor's own floor on the ask a rule decided on (2026-10-27 structural review): the strategy floor lives in sim.py (M_FLOOR)
 # and the 10-21 loss at 0.55 happened when that floor was 0.50. Whatever the rules say, the executor refuses asks under this.
@@ -269,7 +276,7 @@ def init(notify=None, log=None):
         threading.Thread(target=_session_loop, daemon=True).start()
     if os.path.exists(EVENTS_FILE):
         _log(f"live: events calendar {EVENTS_FILE}: {len(load_events())} 個事件" + (f"，現在暫停中：{event_pause()}" if event_pause() else ""))
-    _log(f"live: mode={MODE} shares={LIVE_SHARES:g}{f' (wallet x{WALLET_FRACTION:g}, {MIN_SHARES:g}-{MAX_SHARES:g})' if SIZE_MODE == 'wallet' else ''} max/market={MAX_ORDERS_PER_MARKET} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} warn ${MIN_BALANCE_WARN:g} cooldown {COOLDOWN_MARKETS} mkts kill={KILL_FILE}"
+    _log(f"live: mode={MODE} shares={LIVE_SHARES:g}{f' (wallet x{WALLET_FRACTION:g}, {MIN_SHARES:g}-{MAX_SHARES:g})' if SIZE_MODE == 'wallet' else ''} max/market={MAX_ORDERS_PER_MARKET} slip={SLIP} proxy={ORDER_PROXY or 'direct'} type={ORDER_TYPE} stops: rule/day -{MAX_DAILY_LOSS_VARIANT:g} total/day -{MAX_DAILY_LOSS_TOTAL:g} floor ${MIN_BALANCE_USDC:g} warn ${MIN_BALANCE_WARN:g} cooldown {COOLDOWN_MARKETS} mkts recheck drop {RECHECK_DROP:g} chase {RECHECK_CHASE:g} (<= {CHASE_MAX:g}) kill={KILL_FILE}"
          + (f" rules={sorted(LIVE_VARIANTS)}" if LIVE_VARIANTS else " rules=all")
          + (f" us_pause=on ({US_SESSION_START}-{US_SESSION_END} {US_TZ} Mon-Fri, now {'OPEN -> paused' if us_session_open() else 'closed'})" if PAUSE_US_SESSION else " us_pause=off"))
     if MODE == "live" and not (SIGNER_URL and SIGNER_TOKEN and SIGNER_ADDRESS and API_KEY and API_SECRET and API_PASSPHRASE):
@@ -747,6 +754,8 @@ def _book_moved(book_fn, ask, limit, stage):
     if cur < RECHECK_FLOOR - 1e-9:
         return f"ask fell {ask} -> {cur} under floor {RECHECK_FLOOR:g} before {stage}: not buying"
     if cur > limit + 1e-9:
+        if RECHECK_CHASE > 0 and cur <= limit + RECHECK_CHASE + 1e-9 and cur <= CHASE_MAX + 1e-9:
+            return ("chase", cur)                          # the side ran up a little: re-price instead of giving up
         return f"ask rose {ask} -> {cur} above limit {limit} before {stage}: not sending"
     return None
 
@@ -806,6 +815,10 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, 
         maker, taker, shares, usdc = amounts(price, size, tick)
         row["size"] = shares; row["cost"] = usdc
         moved = _book_moved(book_fn, ask, price, "sign")        # the side collapsed (or ran away) since the decision -> no order
+        if isinstance(moved, tuple):                             # ran up a little: chase one step (re-price before signing)
+            cur = moved[1]; price = tick_round(min(PRICE_MAX, round(cur + SLIP, 3)), tick); row["price"] = price
+            maker, taker, shares, usdc = amounts(price, size, tick); row["size"] = shares; row["cost"] = usdc
+            row["msg"] = f"chased {ask} -> {cur} before sign, limit {price}; "; _log(f"live chase {variant} {slug} {outcome}: {row['msg']}"); moved = None
         if moved:
             row["status"] = "aborted"; row["msg"] = moved; _log(f"live aborted {variant} {slug} {outcome}: {moved}")
             _notify(f"⚠️ [{ASSET.upper()}] 真單取消 {variant}\n{slug} 買 {outcome}：{moved}（剩 {secs_left}s）"); return row
@@ -816,18 +829,27 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, 
         ident = identity()
         neg_risk = bool(market.get("negRisk", False))
         o_maker, o_signer, sig_type = order_parties(ident)
-        order = dict(salt=new_salt(), maker=o_maker, signer=o_signer, tokenId=str(token),
-                     makerAmount=str(maker), takerAmount=str(taker), side=0, signatureType=sig_type,
-                     timestamp=str(int(time.time() * 1000)), metadata=ZERO32, builder=ZERO32, negRisk=neg_risk)
-        # 1) the Worker re-validates (market, side, price, size, identity, daily cap) and signs; the key never leaves it
-        tm["presign"] = time.time()
-        st, signed = worker("btc5m_order", {"order": order, "idempotencyKey": f"{variant}:{slug}", "dry": False})
-        tm["sign"] = time.time()
-        if st != 200 or not signed.get("ok") or not signed.get("signature"):
-            row["status"] = "rejected"; row["msg"] = f"signer {st} {str(signed.get('reason') or signed)[:140]}"; raise RuntimeError(row["msg"])
-        moved = _book_moved(book_fn, ask, price, "post")        # signing took ~0.5 s: look once more before the order goes out
+        for attempt in range(2):                                 # a second pass only when the side ran up after signing (chase once)
+            order = dict(salt=new_salt(), maker=o_maker, signer=o_signer, tokenId=str(token),
+                         makerAmount=str(maker), takerAmount=str(taker), side=0, signatureType=sig_type,
+                         timestamp=str(int(time.time() * 1000)), metadata=ZERO32, builder=ZERO32, negRisk=neg_risk)
+            # 1) the Worker re-validates (market, side, price, size, identity, daily cap) and signs; the key never leaves it
+            tm["presign"] = tm.get("presign") or time.time()
+            st, signed = worker("btc5m_order", {"order": order, "idempotencyKey": f"{variant}:{slug}" + (":chase" if attempt else ""), "dry": False})
+            tm["sign"] = time.time()
+            if st != 200 or not signed.get("ok") or not signed.get("signature"):
+                row["status"] = "rejected"; row["msg"] = f"signer {st} {str(signed.get('reason') or signed)[:140]}"; raise RuntimeError(row["msg"])
+            moved = _book_moved(book_fn, ask, price, "post")    # signing took ~0.5 s: look once more before the order goes out
+            if isinstance(moved, tuple) and attempt == 0:        # ran up a little after signing: re-price and sign once more
+                cur = moved[1]; price = tick_round(min(PRICE_MAX, round(cur + SLIP, 3)), tick); row["price"] = price
+                maker, taker, shares, usdc = amounts(price, size, tick); row["size"] = shares; row["cost"] = usdc
+                row["msg"] = (row["msg"] or "") + f"chased {ask} -> {cur} after sign, limit {price}; "; _log(f"live chase {variant} {slug} {outcome}: {row['msg']}")
+                continue
+            if isinstance(moved, tuple):                          # kept running after the chase: let it go
+                moved = f"ask rose again {ask} -> {moved[1]} above limit {price} after chase: not sending"
+            break
         if moved:
-            row["status"] = "aborted"; row["msg"] = moved; _log(f"live aborted {variant} {slug} {outcome}: {moved}")
+            row["status"] = "aborted"; row["msg"] = (row["msg"] or "") + moved; _log(f"live aborted {variant} {slug} {outcome}: {moved}")
             _notify(f"⚠️ [{ASSET.upper()}] 真單取消 {variant}\n{slug} 買 {outcome}：{moved}（剩 {secs_left}s）"); return row
         wire = dict(salt=order["salt"], maker=order["maker"], signer=order["signer"], tokenId=order["tokenId"],
                     makerAmount=order["makerAmount"], takerAmount=order["takerAmount"], side="BUY", expiration="0",
@@ -848,12 +870,12 @@ def _submit(variant, market, side_idx, ask, secs_left, mode=None, seen_at=None, 
         taking, making = _num("takingAmount"), _num("makingAmount")   # shares received / USDC actually spent (FAK may be partial)
         if resp.get("success") and taking > 0:
             row["status"] = "filled"; row["filled_size"] = taking; row["cost"] = making or usdc
-            if taking + 1e-6 < shares: row["msg"] = f"partial {taking:g}/{shares:g}"
+            if taking + 1e-6 < shares: row["msg"] = (row["msg"] or "") + f"partial {taking:g}/{shares:g}"
         elif resp.get("success"):
-            row["status"] = "unfilled"; row["msg"] = status
+            row["status"] = "unfilled"; row["msg"] = (row["msg"] or "") + status
         else:
             err = str(resp.get("errorMsg") or resp.get("error") or resp)
-            row["status"] = "unfilled" if "fully filled" in err else "rejected"; row["msg"] = err[:160]
+            row["status"] = "unfilled" if "fully filled" in err else "rejected"; row["msg"] = (row["msg"] or "") + err[:160]
         row["msg"] = (row["msg"] + " " + str({k: resp.get(k) for k in ("status", "makingAmount", "takingAmount", "errorMsg")})).strip()
         _log(f"live {row['status']} {variant} {slug} BUY {outcome} {shares}@{price} id={row['order_id'][:12]} {row['msg'][:90]}")
         _notify(f"{'✅' if row['status']=='filled' else '⚠️'} [{ASSET.upper()}] 真單 {row['status']} {variant}\n{slug} 買 {outcome} {shares:g} 股 @{price}（${usdc:.2f}，剩 {secs_left}s）")
