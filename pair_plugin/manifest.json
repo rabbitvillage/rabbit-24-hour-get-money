@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "開盤配對助手（Polymarket 5 分鐘盤）",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "人工模式：第一張由人決定時機、市價固定金額；第二張空白鍵掛限價單（同樣股數、零手續費、目標利潤可調）；擋違規、每場記錄。只在人按鍵時下單。",
   "permissions": [
     "storage"

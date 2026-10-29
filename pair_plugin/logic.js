@@ -101,8 +101,24 @@ var PairLogic = (function () {
     return { cost, fees, payout, pnl: payout - cost - fees, paired };
   }
 
+  // 幣價離開盤基準線多遠，正 = 幣價站在 side 這一邊（side 是 Up 時幣價高於基準線為正）。
+  // z = |bps| / √剩餘秒數（和 Docs/custom-queries/pair_undecided_check.py 同算法），越小代表結果越沒定。
+  function distance(cl, line, side, sFromOpen) {
+    if (cl == null || line == null || !(line > 0)) return null;
+    const sg = side === "Down" ? -1 : 1, usd = (cl - line) * sg, bps = usd / line * 1e4;
+    return { usd, bps, z: Math.abs(bps) / Math.sqrt(Math.max(300 - sFromOpen, 1)) };
+  }
+  // 開盤基準線：開盤前 60 秒 Chainlink 每秒價格的平均（和官方算法相同）。pts = [[秒, 價格], ...]；資料不到 45 秒就不算
+  function lineFrom(pts, start) {
+    const seen = new Map();
+    for (const [sec, v] of pts) if (sec >= start - 60 && sec < start && v > 0) seen.set(sec, v);
+    if (seen.size < 45) return null;
+    let a = 0; for (const v of seen.values()) a += v; return a / seen.size;
+  }
+
   // 每場紀錄匯出成 CSV（給之後分析 fish 的進場判斷）
-  const COLS = ["slug", "asset", "leg1_side", "leg1_price", "leg1_shares", "leg1_s", "click_s", "click_up_ask", "click_dn_ask", "path60",
+  const COLS = ["slug", "asset", "leg1_side", "leg1_price", "leg1_shares", "leg1_s", "click_s", "click_side", "click_up_ask", "click_dn_ask",
+                "cl_click", "line", "line_src", "dist_usd", "dist_bps", "dist_z", "path60",
                 "leg2_price", "leg2_shares", "leg2_placed_s", "leg2_filled_shares", "leg2_fill_s", "winner", "paired", "pnl"];
   function toCSV(records) {
     const esc = v => { if (v == null) return ""; const s = typeof v === "number" ? String(Math.round(v * 10000) / 10000) : String(v);
@@ -110,6 +126,6 @@ var PairLogic = (function () {
     return [COLS.join(",")].concat(records.map(r => COLS.map(c => esc(r[c])).join(","))).join("\n") + "\n";
   }
 
-  return { FEE_RATE, DEFAULTS, EPS_SH, fee, pairProfit, makerProfit, leg2Price, leg2Cap, positionFrom, decide, settle, other, toCSV, COLS };
+  return { FEE_RATE, DEFAULTS, EPS_SH, fee, pairProfit, makerProfit, leg2Price, leg2Cap, positionFrom, decide, settle, other, toCSV, COLS, distance, lineFrom };
 })();
 if (typeof module !== "undefined") module.exports = PairLogic;

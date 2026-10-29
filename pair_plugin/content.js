@@ -17,6 +17,8 @@
   let lastDecision = null;
   let store = { settled: {}, legs: {}, journal: {} };   // 結算統計、每場第二張掛單狀態、每場紀錄
   let hist = [];           // 這一場每秒的兩邊賣價 [s, up, down]
+  const RTDS = "wss://ws-live-data.polymarket.com";   // Polymarket 公開 Chainlink 每秒價格（連上會先送最近約 1 分鐘）
+  let clWs = null, clPing = null, clPts = [], clLine = null;   // clPts = [[秒, 價格]]；clLine = 自己算的開盤基準線
 
   // ---------- 設定與儲存 ----------
   chrome.storage.sync.get(CFG0, v => { cfg = v; });
@@ -34,7 +36,7 @@
     <div id="pp-body"><div class="pp-asks"><div class="pp-ask" id="pp-up">Up 賣價<b>—</b></div><div class="pp-ask" id="pp-dn">Down 賣價<b>—</b></div></div>
     <div class="pp-msg" id="pp-msg">打開任何一場 BTC／ETH／SOL 5 分鐘盤</div>
     <button id="pp-go" class="pp-go" disabled>空白鍵</button>
-    <div class="pp-row" id="pp-pos"></div><div class="pp-row" id="pp-stats"></div>
+    <div class="pp-row" id="pp-line"></div><div class="pp-row" id="pp-pos"></div><div class="pp-row" id="pp-stats"></div>
     <div class="pp-row"><a id="pp-reset" class="pp-link" style="display:none">第二張重掛（先在頁面上取消舊掛單）</a></div>
     <div class="pp-warn" id="pp-warn"></div></div>`;
   function mount() { if (!document.getElementById("pp-panel")) document.body.appendChild(panel); }
@@ -87,6 +89,26 @@
     ws.onmessage = e => onWs(String(e.data));
     ws.onclose = () => { clearInterval(pingT); if (mkt && mkt.slug === slug) setTimeout(() => { if (mkt && mkt.slug === slug) connect(); }, 1500); };
   }
+  function connectCl() {
+    if (clWs) { try { clWs.onclose = null; clWs.close(); } catch (e) {} } clearInterval(clPing); clWs = null;
+    if (!mkt) return;
+    const slug = mkt.slug, sym = mkt.asset.toLowerCase() + "/usd";
+    clWs = new WebSocket(RTDS);
+    clWs.onopen = () => {   // 篩選條件要用沒有空格的 JSON，不然收不到更新；一條連線只訂一個幣
+      clWs.send(JSON.stringify({ action: "subscribe", subscriptions: [{ topic: "crypto_prices_chainlink", type: "*", filters: JSON.stringify({ symbol: sym }) }] }));
+      clPing = setInterval(() => { try { clWs.send("PING"); } catch (e) {} }, 10000);
+    };
+    clWs.onmessage = e => {
+      let d; try { d = JSON.parse(String(e.data)); } catch (x) { return; }
+      const p = d && d.payload; if (!p || (p.symbol && p.symbol !== sym)) return;
+      const add = (ts, v) => { const sec = Math.floor(Number(ts) / 1000), val = Number(v); if (sec > 0 && val > 0 && !clPts.some(x => x[0] === sec)) clPts.push([sec, val]); };
+      if (Array.isArray(p.data)) for (const x of p.data) add(x.timestamp, x.value); else if (p.value != null) add(p.timestamp, p.value);
+      clPts.sort((a, b) => a[0] - b[0]); if (clPts.length > 600) clPts = clPts.slice(-600);
+      if (clLine == null && mkt && Date.now() / 1000 >= mkt.start) clLine = L.lineFrom(clPts, mkt.start);
+    };
+    clWs.onclose = () => { clearInterval(clPing); if (mkt && mkt.slug === slug) setTimeout(() => { if (mkt && mkt.slug === slug) connectCl(); }, 1500); };
+  }
+  const clNow = () => (clPts.length ? clPts[clPts.length - 1][1] : null);
   const asksNow = () => ({ Up: best(mkt.tokens.Up, "ask"), Down: best(mkt.tokens.Down, "ask") });
 
   // ---------- 市場、自己的成交、結算 ----------
@@ -121,8 +143,31 @@
       const res = L.settle(pos, outs[i], !!stOf(mkt.slug).leg2);
       store.settled[mkt.slug] = Object.assign({ winner: outs[i], day: new Date().toISOString().slice(0, 10), up: pos.Up.shares, down: pos.Down.shares }, res);
       Object.assign(recOf(), { winner: outs[i], paired: res.paired ? 1 : 0, pnl: res.pnl });
+      fillLine(recOf(), d[0].eventMetadata);
       save();
     } catch (e) {}
+  }
+  // 收盤後用官方開盤價（priceToBeat）重算離基準線距離；進行中官方還沒公布
+  function fillLine(rec, meta) {
+    const off = meta && Number(meta.priceToBeat);
+    if (!(off > 0) || rec.line_src === "official") return;
+    rec.line = off; rec.line_src = "official";
+    const dd = L.distance(rec.cl_click, off, rec.click_side, rec.click_s);
+    if (dd) Object.assign(rec, { dist_usd: dd.usd, dist_bps: dd.bps, dist_z: dd.z });
+  }
+  // 已經離開頁面的場次：收盤後補官方開盤價和贏家（損益要停在那一頁才算得到）
+  async function backfill() {
+    const now = Date.now() / 1000;
+    for (const rec of Object.values(store.journal)) {
+      if (rec.line_src === "official" && rec.winner) continue;
+      const start = Number(String(rec.slug).split("-").pop()); if (!(now > start + 320) || now > start + 86400 * 3) continue;
+      try {
+        const d = await (await fetch(`https://gamma-api.polymarket.com/events?slug=${rec.slug}`)).json(); if (!d || !d.length) continue;
+        fillLine(rec, d[0].eventMetadata);
+        if (!rec.winner) { const m = d[0].markets[0]; const pr = JSON.parse(m.outcomePrices || "[]"); const i = pr.findIndex(x => Number(x) >= 0.99); if (i >= 0) rec.winner = JSON.parse(m.outcomes)[i]; }
+        save();
+      } catch (e) {}
+    }
   }
 
   // ---------- 讀頁面（2026-10-30 實測，未登入）----------
@@ -205,7 +250,10 @@
       if (d.phase === "first") {                            // 記下按下第一張那一刻的盤面，之後分析進場判斷
         const s = Date.now() / 1000 - mkt.start, a = asksNow();
         const path = hist.filter(h => h[0] >= s - 60).filter((h, i) => i % 2 === 0).map(h => `${h[0]}:${h[1] ?? ""}/${h[2] ?? ""}`).join(";");
-        Object.assign(recOf(), { click_s: s, click_up_ask: a.Up, click_dn_ask: a.Down, path60: path }); save();
+        const cl = clNow(), dd = L.distance(cl, clLine, bb.side, s);
+        Object.assign(recOf(), { click_s: s, click_side: bb.side, click_up_ask: a.Up, click_dn_ask: a.Down, path60: path, cl_click: cl },
+                      clLine != null ? { line: clLine, line_src: "live" } : {}, dd ? { dist_usd: dd.usd, dist_bps: dd.bps, dist_z: dd.z } : {});
+        save();
       }
       warn(`已放行：市價買 ${bb.side} $${bb.amount}`);
     }
@@ -263,11 +311,11 @@
   let lastPath = "";
   async function onRoute() {
     const m = location.pathname.match(SLUG_RE); lastPath = location.pathname;
-    if (!m) { mkt = null; connect(); render(); return; }
+    if (!m) { mkt = null; connect(); connectCl(); render(); return; }
     if (mkt && mkt.slug === m[1]) return;
-    mkt = null; pos = L.positionFrom([]); hist = []; render();
+    mkt = null; pos = L.positionFrom([]); hist = []; clPts = []; clLine = null; render();
     try { mkt = await loadMarket(m[1]); } catch (e) { mkt = null; }
-    connect(); loadTrades();
+    connect(); connectCl(); loadTrades();
   }
   function render() {
     mount();
@@ -288,6 +336,9 @@
     go.disabled = !sg;
     go.textContent = !sg ? "現在沒有可以做的" : sg.kind === "market" ? `空白鍵：市價買 ${sg.side} $${sg.amount}（U／D 指定邊）` : `空白鍵：掛 ${sg.side} 限價 ${sg.price.toFixed(2)} × ${sg.shares.toFixed(2)} 股`;
     $("#pp-reset").style.display = d.phase === "waiting" ? "" : "none";
+    const cl = clNow(), dl = L.distance(cl, clLine, "Up", s);
+    $("#pp-line").textContent = cl == null ? "幣價：連線中…" : clLine == null ? `幣價 ${cl.toFixed(2)}｜開盤線：要在開盤前 1 分鐘內打開頁面才算得出來（收盤後紀錄會補官方值）`
+      : `幣價 ${cl.toFixed(2)}｜離開盤線 ${dl.usd >= 0 ? "+" : ""}${dl.usd.toFixed(2)}（${dl.usd >= 0 ? "偏 Up" : "偏 Down"}，標準化 ${dl.z.toFixed(2)}）`;
     $("#pp-pos").textContent = `部位：Up ${pos.Up.shares.toFixed(2)} 股${pos.Up.avg ? " @" + pos.Up.avg.toFixed(3) : ""}｜Down ${pos.Down.shares.toFixed(2)} 股${pos.Down.avg ? " @" + pos.Down.avg.toFixed(3) : ""}`;
     const today = new Date().toISOString().slice(0, 10); const rs = Object.values(store.settled).filter(r => r.day === today);
     if (rs.length) {
@@ -297,5 +348,6 @@
   }
   setInterval(() => { if (location.pathname !== lastPath) onRoute(); render(); }, 250);
   setInterval(() => { loadTrades(); checkSettled(); }, 2000);
+  setInterval(backfill, 30000);
   onRoute();
 })();

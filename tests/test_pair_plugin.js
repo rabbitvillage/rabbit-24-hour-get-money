@@ -58,3 +58,17 @@ test("unpaired single leg settles to all-or-nothing; journal exports as CSV", ()
   assert.strictEqual(head.split(",").length, L.COLS.length);
   assert.ok(row.startsWith("btc-updown-5m-1,BTC,Down,0.4,"));
 });
+
+test("opening line = mean of the 60 s before the open; distance is signed toward the bought side", () => {
+  const start = 1000, pts = [];
+  for (let sec = start - 70; sec < start + 5; sec++) pts.push([sec, sec < start - 60 ? 1 : sec < start ? 100 + (sec - (start - 60)) * 0.1 : 999]);
+  const line = L.lineFrom(pts, start);
+  assert.ok(Math.abs(line - (100 + 59 * 0.1 / 2)) < 1e-9);                       // only [start-60, start)
+  assert.strictEqual(L.lineFrom(pts.filter(p => p[0] >= start - 40), start), null); // under 45 s of data: unknown
+  const up = L.distance(102.95 + 10, 102.95, "Up", 75), dn = L.distance(102.95 + 10, 102.95, "Down", 75);
+  assert.ok(Math.abs(up.usd - 10) < 1e-9 && Math.abs(dn.usd + 10) < 1e-9);
+  assert.ok(Math.abs(up.bps - 10 / 102.95 * 1e4) < 1e-9);
+  assert.ok(Math.abs(up.z - Math.abs(up.bps) / 15) < 1e-9);                       // √(300 − 75) = 15
+  assert.strictEqual(L.distance(null, 100, "Up", 10), null);
+  assert.strictEqual(L.distance(100, null, "Up", 10), null);
+});
