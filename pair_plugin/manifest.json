@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "開盤配對助手（Polymarket 5 分鐘盤）",
+  "version": "0.1.0",
+  "description": "盯盤提示＋紀律鎖：開盤第一分鐘先跌到 0.40 的那邊買第一張，另一邊到價再補同樣股數；每張金額固定、同場只做一組。不會自己下單。",
+  "permissions": ["storage"],
+  "host_permissions": ["https://polymarket.com/*"],
+  "content_scripts": [{
+    "matches": ["https://polymarket.com/*"],
+    "js": ["logic.js", "content.js"],
+    "css": ["panel.css"],
+    "run_at": "document_idle"
+  }],
+  "options_page": "options.html"
+}
