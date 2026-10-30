@@ -1,0 +1,20 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><title>開盤配對助手 設定</title>
+<style>body{font:14px -apple-system,"PingFang TC",sans-serif;max-width:560px;margin:32px auto;padding:0 16px;color:#111}
+label{display:block;margin:14px 0 4px;font-weight:600}input{width:100%;padding:8px;font-size:14px;box-sizing:border-box}
+.note{color:#555;font-size:12px}button{margin-top:18px;padding:8px 16px;font-size:14px}#ok,#cnt{color:#065f46;margin-left:8px}
+h3{margin-top:32px}</style></head>
+<body><h2>開盤配對助手 設定（人工模式）</h2>
+<div class="note" style="background:#dbeafe;padding:8px;border-radius:6px">練習模式（不花錢）在頁面面板最上面的勾選框切換，預設開啟。練習模式不需要錢包地址。</div>
+<label for="addr">你的 Polymarket 錢包地址（0x 開頭）</label>
+<input id="addr" placeholder="0x…" spellcheck="false">
+<div class="note">在 Polymarket 個人頁可以複製。這是公開地址，只用來讀你自己的成交紀錄；插件不需要也不會要私鑰。</div>
+<label for="amount">第一張金額（美元，市價買）</label>
+<input id="amount" type="number" min="1" step="1" value="5">
+<div class="note">用 1-Tap 時要是頁面上有的金額（$5／$25／$100），不然會改用市價單填金額。第二張自動買同樣股數。</div>
+<label for="last">第一張最晚到開盤後幾秒</label>
+<input id="last" type="number" min="10" max="290" step="10" value="240">
+<button id="save">儲存</button><span id="ok"></span>
+<h3>每場紀錄</h3>
+<div class="note">每按一次第一張，插件記下當下兩邊賣價和前 60 秒走勢，之後拿來分析你的進場判斷。</div>
+<button id="export">下載紀錄 CSV</button><span id="cnt"></span>
+<script src="logic.js"></script><script src="options.js"></script></body></html>

@@ -1,0 +1,10 @@
+[Unit]
+Description=BTC/SOL 5m bot hourly self-review (continue / fix / emergency stop)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/rabbit-24-hour-get-money
+EnvironmentFile=/opt/rabbit-24-hour-get-money/btc5m_sim/.env
+EnvironmentFile=-/opt/rabbit-24-hour-get-money/btc5m_sim/.live.env
+ExecStart=/usr/bin/env python3 -m btc5m_sim.review

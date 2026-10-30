@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "開盤配對助手（Polymarket 5 分鐘盤）",
+  "version": "0.6.1",
+  "description": "人工模式＋練習模式（預設，不花錢）。兩張的時機都由人決定，按下去就直接買；面板第三格即時顯示「現在補對面能賺幾 %」（照盤口買滿同樣股數的均價）；擋違規、每場記錄。",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "https://polymarket.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://polymarket.com/*"
+      ],
+      "js": [
+        "logic.js",
+        "content.js"
+      ],
+      "css": [
+        "panel.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html"
+}

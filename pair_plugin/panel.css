@@ -1,0 +1,36 @@
+/* contain：面板內容怎麼變都不讓整個網頁重新排版（避免干擾 Polymarket 的倒數動畫） */
+#pp-panel{contain:layout style paint;position:fixed;top:90px;right:16px;z-index:2147483647;width:330px;font:13px/1.45 -apple-system,"PingFang TC",sans-serif;
+  background:#111827;color:#f9fafb;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.35);padding:12px 14px;user-select:none}
+#pp-panel .pp-h{display:flex;justify-content:space-between;align-items:center;font-weight:600;margin-bottom:6px;cursor:move}
+#pp-panel .pp-t{font-variant-numeric:tabular-nums;color:#9ca3af;font-weight:500}
+#pp-panel .pp-asks{display:flex;gap:8px;margin:6px 0}
+#pp-panel .pp-ask{flex:1;border-radius:8px;padding:6px 8px;background:#1f2937;text-align:center}
+#pp-panel .pp-ask b{display:block;font-size:20px;font-variant-numeric:tabular-nums}
+#pp-panel .pp-ask.hot{background:#065f46;outline:2px solid #34d399}
+#pp-panel .pp-msg{border-radius:8px;padding:8px;margin:6px 0;background:#1f2937}
+#pp-panel .pp-msg.go{background:#065f46}
+#pp-panel .pp-msg.stop{background:#7f1d1d}
+#pp-panel .pp-msg.done{background:#1e3a8a}
+#pp-panel .pp-row{color:#d1d5db;font-size:12px;margin-top:4px}
+#pp-panel .pp-warn{color:#fca5a5;font-size:12px;margin-top:4px;min-height:16px}
+#pp-panel .pp-x{cursor:pointer;color:#9ca3af;font-weight:400}
+#pp-flash{contain:layout style paint;position:fixed;left:50%;top:20px;transform:translateX(-50%);z-index:2147483647;background:#b91c1c;color:#fff;
+  font:600 15px -apple-system,"PingFang TC",sans-serif;padding:10px 16px;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+#pp-panel .pp-go{width:100%;margin:6px 0 2px;padding:12px;font:700 16px -apple-system,"PingFang TC",sans-serif;border:0;border-radius:10px;
+  background:#10b981;color:#062e22;cursor:pointer}
+#pp-panel .pp-go:disabled{background:#374151;color:#9ca3af;cursor:default}
+#pp-panel .pp-msg.ready{background:#1f2937;outline:1px solid #34d399}
+#pp-panel .pp-link{color:#93c5fd;cursor:pointer;text-decoration:underline}
+#pp-flash.ok{background:#047857}
+#pp-panel .pp-mode{display:block;border-radius:8px;padding:6px 8px;margin:4px 0 6px;font-weight:600;cursor:pointer}
+#pp-panel .pp-mode.sim{background:#1e3a8a;color:#dbeafe}
+#pp-panel .pp-mode.live{background:#7f1d1d;color:#fee2e2}
+#pp-panel .pp-mode input{margin-right:6px;vertical-align:middle}
+#pp-panel .pp-ask i{display:block;font-style:normal;font-size:11px;color:#9ca3af;min-height:14px}
+#pp-panel .pp-lock.up{background:#065f46;outline:2px solid #34d399}
+#pp-panel .pp-lock.up i{color:#d1fae5}
+#pp-panel .pp-lock.down{background:#7f1d1d}
+#pp-panel .pp-lock.down i{color:#fecaca}
+#pp-panel .pp-ask.deep i{color:#6ee7b7}
+#pp-panel .pp-ask.shallow i{color:#fbbf24}
+#pp-panel .pp-go.warn{background:#f59e0b;color:#3b2300}

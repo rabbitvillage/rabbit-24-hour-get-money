@@ -9,6 +9,32 @@
 
 結果寫在 `btc5m_sim/data/sim_trades.csv`。Telegram 會播：啟動、每小時摘要、每天摘要，以及每一筆模擬輸掉的單。
 
+## 影子變體與 BTC 距離（同一場盤同時評分，仍不下單）
+
+同一次訂單簿輪詢也拿來評分其他進場規則（`VARIANTS`，預設 `w45_p98,w30_p98,w20_p98,w45_p99,w30_p99,w45_p98_s,w45_p98_s10,w45_p98_s20,w45_p98_s30,w60_m95_s10,w60_m95_s20`，
+意思是「最後 45／30／20 秒、最低買價 98¢ 或 99¢」；`_s` ＝ 加距離過濾：BTC 現價相對「開盤時我們自己抓的現價」要站在買的那一邊，
+`_s10`／`_s20`／`_s30` ＝ 而且距離至少 10／20／30 美元；`m95` ＝ 價格**上限**：領先方賣價在 50～95¢ 之間就買（提早、便宜進場，一贏賺得多，靠距離過濾擋翻盤；10-20 用 322 場回測挑出的 `w60_m95_s10`／`_s20`）。這是針對 2026-10-19 16:50 那場「貼線翻盤」加的），每場每個變體各寫一列到 `btc5m_sim/data/sim_variants.csv`。
+`sim_trades.csv` 的欄位不變，仍是主規則（ENTRY_WINDOW／MIN_PRICE）。
+
+另外從收盤前 `SPOT_WINDOW`（預設同 `BOOK_WINDOW`＝150）秒起，每秒抓一次 BTC 現價（Coinbase 交易所即時買賣價中點，失敗改 Kraken 最後成交價），用來記錄：
+
+- 結算來源是 Chainlink **Data Streams** 的 BTC/USD 60 秒 TWAP（需付費憑證，拿不到）。免費最接近的是 Polygon 鏈上的 Chainlink BTC/USD 聚合器（`CHAIN_RPCS` 公開 RPC、`CHAIN_FEED` 合約），
+  約每 30 秒更新一次；每場寫進 `sim_chain.csv`，並記 `chain_at_start`（開盤時鏈上價，`_s` 變體的基準線）、`chain_ptb_err`、`chain_at_entry`、`chain_dist_at_entry`、`chain_age_at_entry`。
+- 欄位改變時程式會自動開新檔（`sim_variants_v2.csv`…），舊檔不動；push 腳本會把所有版本一起讀。
+- `spot_at_start`／`ptb_err`：開盤那一刻我們自己抓的現價，以及它和真正 priceToBeat 的差。
+  gamma 的 priceToBeat **要到收盤後才會出現**，所以盤中只能用 `spot_at_start` 當基準價的替代值；`ptb_err` 告訴你這個替代值差多少。
+  所有距離欄位都是結算後拿到 priceToBeat 再回填的。
+- `spot_at_window`／`dist_at_window`：該變體窗口打開那一刻的現價與「現價 − priceToBeat」（美元，正值偏 Up）
+- `spot_at_entry`／`dist_at_entry`：假想進場那一刻的現價與距離
+- `twap_dist_at_entry`：進場時「已經落在最後 60 秒結算窗口內的現價平均」− priceToBeat。
+  翻盤需要剩餘時間的均價反向偏離約 `twap_dist × (60 − secs_left) / secs_left`
+- `min_abs_dist`：這場最後 60 秒內現價離 priceToBeat 最近的距離；`spot_samples`：取到幾個樣本
+
+Telegram 每小時／每日摘要會多一段各變體的進場數、輸的筆數與損益。每小時／每日摘要只算程序啟動後的場次，
+`systemctl restart` 會歸零摘要；CSV 不受影響。
+
+    python3 -m unittest tests.test_btc5m_sim   # 純邏輯測試，不需要網路
+
 ## 部署到 VPS（一行）
 
     git clone https://github.com/rabbitvillage/rabbit-24-hour-get-money.git && cd rabbit-24-hour-get-money && git checkout claude/project-thread-27gj0j && sudo bash btc5m_sim/deploy.sh
@@ -25,3 +51,13 @@
 ## 本機直接跑
 
     set -a; . btc5m_sim/.env; set +a; python3 -m btc5m_sim.sim
+
+## 階段 1：下單模組（`live.py`）
+
+`EXEC_MODE=off`（預設，純模擬）／`dry`（每一筆該下的單都走完所有檢查、寫進 `data/live_orders.csv`，狀態 `dry`，什麼都不送出）／`live`（真單：意圖送到簽名 Worker 簽名 → 以 FOK『不能全成交就取消』送到 CLOB）。
+
+- 每條規則（`main` ＋ 每個影子變體）各自記帳：`data/live_results.csv`。同一條規則同一場只試一次。
+- 停損：單條規則今日已結算虧損 ≤ −15 美元就停到明天；全部合計 ≤ −50 全停；`touch data/STOP` 立刻全停（已成交的照常結算）。
+- 真單需要的憑證只放 `btc5m_sim/.live.env`（0600、git 忽略）：`SIGNER_URL`、`SIGNER_TOKEN`、`SIGNER_ADDRESS`、`CLOB_API_KEY`／`SECRET`／`PASSPHRASE`。**私鑰不在主機**，在 Worker。
+- 成交率怎麼看：`live_orders.csv` 的 `status` 欄：`filled`／`unfilled`（FOK 沒吃到）／`rejected`／`error`／`skipped`（被停損或其他檢查擋下，`msg` 寫原因）／`dry`。
+- Worker 路由規格：`SIGNER_ROUTE_SPEC.md`。

@@ -1,0 +1,8 @@
+[Unit]
+Description=IO (Independent Operation) shadow: buy the favourite at 0.97 in the last 60 s, read-only, no orders
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/rabbit-24-hour-get-money
+ExecStart=/usr/bin/env python3 -m btc5m_sim.io_monitor
