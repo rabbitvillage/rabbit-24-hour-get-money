@@ -25,3 +25,8 @@
 #pp-panel .pp-mode.sim{background:#1e3a8a;color:#dbeafe}
 #pp-panel .pp-mode.live{background:#7f1d1d;color:#fee2e2}
 #pp-panel .pp-mode input{margin-right:6px;vertical-align:middle}
+#pp-panel .pp-ask i{display:block;font-style:normal;font-size:11px;color:#9ca3af;min-height:14px}
+#pp-panel .pp-lock.up{background:#065f46;outline:2px solid #34d399}
+#pp-panel .pp-lock.up i{color:#d1fae5}
+#pp-panel .pp-lock.down{background:#7f1d1d}
+#pp-panel .pp-lock.down i{color:#fecaca}

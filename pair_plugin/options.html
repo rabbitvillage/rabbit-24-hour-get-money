@@ -11,9 +11,6 @@ h3{margin-top:32px}</style></head>
 <label for="amount">第一張金額（美元，市價買）</label>
 <input id="amount" type="number" min="1" step="1" value="5">
 <div class="note">用 1-Tap 時要是頁面上有的金額（$5／$25／$100），不然會改用市價單填金額。第二張自動買同樣股數。</div>
-<label for="margin">第二張目標利潤（每股，美元）</label>
-<input id="margin" type="number" min="0.01" max="0.20" step="0.01" value="0.07">
-<div class="note">第二張掛單價 = 1 − 第一張價格 − 第一張手續費 − 這個數字。10-30 用 135 場回放：目標 7～10 分比 3 分好（成功一對賺得多，比較撐得住沒補到的那幾場）。</div>
 <label for="last">第一張最晚到開盤後幾秒</label>
 <input id="last" type="number" min="10" max="290" step="10" value="240">
 <button id="save">儲存</button><span id="ok"></span>

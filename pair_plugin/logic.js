@@ -1,11 +1,12 @@
 // 開盤配對規則（純函式，content script 和測試共用）。
 // 人工模式（fish 2026-10-30）：
 //   第一張：什麼時候買、買哪一邊由人決定，只能用市價（1-Tap 或市價單），金額固定，不准放大。
-//   第二張：插件算好「同樣股數」和掛單價 p2 = 1 − p1 − 第一張手續費 − 目標利潤，人按空白鍵掛限價單（掛單不收手續費）。
+//   第二張：什麼時候補也由人決定。面板第三個數字即時顯示「現在補對面能賺幾 %」（含兩張手續費），
+//           人按空白鍵就用對面當下賣價、同樣股數鎖定（限價單掛在當下賣價，等於立刻成交）。
 //   抱到結算拿 $1。同一場只做一組；不准加買第一張那一邊。
 var PairLogic = (function () {
   const FEE_RATE = 0.07;                         // Polymarket 加密盤吃單手續費：7% × p × (1 − p) × 股數，另外加收；掛單不收
-  const DEFAULTS = { AMOUNT: 5, MARGIN: 0.07, LAST: 240, LEG2_SLACK: 0.03 };
+  const DEFAULTS = { AMOUNT: 5, MARGIN: 0.07, LAST: 240, LEG2_SLACK: 0.03 };   // MARGIN 只剩 leg2Price 用（舊查詢與測試），面板已不用
   const EPS_SH = 0.05;                           // 兩邊股數差在這以內就算成對（市價買會有零碎股數）
 
   function fee(p) { return FEE_RATE * p * (1 - p); }
@@ -63,32 +64,37 @@ var PairLogic = (function () {
       const cheap = asks.Up == null ? "Down" : asks.Down == null ? "Up" : (asks.Up <= asks.Down ? "Up" : "Down");
       if (asks[cheap] == null) { res.msg = "等盤口報價"; return res; }
       res.suggest = { kind: "market", side: cheap, amount: cfg.AMOUNT };
+      if (asks.Up != null && asks.Down != null) res.live = { kind: "sum", sum: asks.Up + asks.Down };
       res.msg = `進場時機你決定。空白鍵＝市價買較便宜的 ${cheap} @${f2(asks[cheap])}（$${cfg.AMOUNT}）；U／D 鍵指定邊。` +
-        `買在 ${f2(asks[cheap])}，對面要跌到 ${f2(leg2Price(asks[cheap], cfg.MARGIN))} 才補得到。`;
+        `買在 ${f2(asks[cheap])} 的話，對面跌到 ${f2(leg2Cap(asks[cheap]))} 以下補起來才賺。`;
       return res;
     }
-    // 已有第一張，處理第二張
+    // 已有第一張，處理第二張：時機由人決定；第三個數字 = 現在用對面賣價補，扣兩張手續費後賺幾 %
     const s1 = pos.first, s2 = other(s1), p1 = pos[s1].avg, a2 = asks[s2];
     const need = Math.floor((pos[s1].shares - pos[s2].shares) * 100) / 100;
-    const p2 = leg2Price(p1, cfg.MARGIN);
-    res.phase = "second"; res.p2 = p2; res.need = need;
+    res.phase = "second"; res.need = need;
     if (need < EPS_SH) { res.phase = "done"; res.level = "done"; res.msg = "兩邊股數已一樣，本場不再下單。"; return res; }
-    if (st.leg2) {
+    if (a2 != null) res.live = lockNow(p1, a2, s2);
+    if (st.leg2 && !st.leg2.done) {
       res.phase = "waiting";
-      res.msg = `第二張掛單已送出：${s2} @${f2(st.leg2.price)} × ${st.leg2.shares.toFixed(2)} 股，已成交 ${pos[s2].shares.toFixed(2)} 股。` +
-        `等 ${s2} 賣價跌到 ${f2(st.leg2.price)}（現在 ${f2(a2)}）。不准加買 ${s1}。`;
+      res.msg = `第二張已送出：${s2} 限價 ${f2(st.leg2.price)} × ${st.leg2.shares.toFixed(2)} 股，已成交 ${pos[s2].shares.toFixed(2)} 股（價格跑掉沒成交就會掛著等）。不准加買 ${s1}。`;
       return res;
     }
-    res.allow[s2] = true; res.limit[s2] = { price: p2, shares: need };
-    if (a2 != null && pairProfit(p1, a2) > 0.001) res.market[s2] = Math.round(need * a2 * (1 + cfg.LEG2_SLACK) * 100) / 100;
-    res.suggest = { kind: "limit", side: s2, price: p2, shares: need };
-    res.level = "go";
-    const cross = a2 != null && a2 <= p2 + 1e-9;
-    res.msg = `已買 ${s1} ${pos[s1].shares.toFixed(2)} 股 @${p1.toFixed(3)}。空白鍵＝掛 ${s2} 限價 @${f2(p2)} × ${need.toFixed(2)} 股` +
-      `（零手續費，成交後每股賺約 ${(makerProfit(p1, p2) * 100).toFixed(1)} 分）。` +
-      (cross ? `對面現在 ${f2(a2)} 已低於掛單價，會立刻吃單成交（收手續費，每股約賺 ${(pairProfit(p1, a2) * 100).toFixed(1)} 分）。` : `對面現在 ${f2(a2)}。`) +
-      `不准加買 ${s1}。`;
+    if (a2 == null) { res.msg = `已買 ${s1} ${pos[s1].shares.toFixed(2)} 股 @${p1.toFixed(3)}。等 ${s2} 的報價。`; return res; }
+    const lp = Math.ceil(a2 * 100 - 1e-9) / 100;            // 限價取整到 1 分、不低於賣價，送出就會成交
+    res.allow[s2] = true; res.limit[s2] = { price: lp, shares: need };
+    res.market[s2] = Math.round(need * a2 * (1 + cfg.LEG2_SLACK) * 100) / 100;
+    res.suggest = { kind: "limit", side: s2, price: lp, shares: need };
+    res.level = res.live.perShare > 0 ? "go" : "ready";
+    res.msg = `已買 ${s1} ${pos[s1].shares.toFixed(2)} 股 @${p1.toFixed(3)}。什麼時候補你決定：空白鍵＝現在用 ${s2} ${f2(a2)} 買 ${need.toFixed(2)} 股鎖定` +
+      `（${res.live.perShare >= 0 ? "賺" : "虧"} ${Math.abs(res.live.pct * 100).toFixed(1)}%）。${s2} 跌到 ${f2(leg2Cap(p1))} 以下才開始賺。不准加買 ${s1}。`;
     return res;
+  }
+
+  // 現在用對面賣價 a2 補第二張：每股淨賺（扣兩張吃單手續費）和報酬率（÷ 兩張成本加手續費）
+  function lockNow(p1, a2, side) {
+    const perShare = pairProfit(p1, a2), cost = p1 + a2 + fee(p1) + fee(a2);
+    return { kind: "lock", side, ask: a2, perShare, pct: perShare / cost };
   }
 
   // 結算後這一場的損益（第一張收吃單手續費；第二張若是掛單不收）
@@ -140,6 +146,6 @@ var PairLogic = (function () {
     return [COLS.join(",")].concat(records.map(r => COLS.map(c => esc(r[c])).join(","))).join("\n") + "\n";
   }
 
-  return { FEE_RATE, DEFAULTS, EPS_SH, fee, pairProfit, makerProfit, leg2Price, leg2Cap, positionFrom, decide, settle, other, toCSV, COLS, distance, lineFrom, fillMarket, fillShares };
+  return { FEE_RATE, DEFAULTS, EPS_SH, fee, pairProfit, makerProfit, leg2Price, leg2Cap, positionFrom, decide, settle, other, toCSV, COLS, distance, lineFrom, fillMarket, fillShares, lockNow };
 })();
 if (typeof module !== "undefined") module.exports = PairLogic;

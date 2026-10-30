@@ -2,7 +2,7 @@
 // 練習模式（預設開）：按鍵不碰頁面上的下單按鈕，改用當下真實盤口模擬成交，收盤後照真實結果算損益；不花錢。
 // 插件只在人按鍵或點按鈕時才動作，不會自己下單：
 //   第一張：人決定時機，空白鍵＝市價買較便宜的那邊（U／D 鍵指定邊），金額固定。
-//   第二張：空白鍵＝把對面掛成限價單，同樣股數，價格 = 1 − p1 − 第一張手續費 − 目標利潤（掛單不收手續費）。
+//   第二張：時機由人決定。面板第三格即時顯示「現在補對面能賺幾 %」；空白鍵＝用對面當下賣價、同樣股數鎖定。
 (function () {
   "use strict";
   const L = PairLogic;
@@ -37,7 +37,7 @@
   // ---------- 面板 ----------
   const panel = document.createElement("div"); panel.id = "pp-panel";
   panel.innerHTML = `<div class="pp-h"><span id="pp-title">開盤配對助手</span><span><span class="pp-t" id="pp-time"></span> <span class="pp-x" id="pp-min">—</span></span></div>
-    <div id="pp-body"><label class="pp-mode" id="pp-modebox"><input type="checkbox" id="pp-practice"> 練習模式（不花錢、不會下單）</label><div class="pp-asks"><div class="pp-ask" id="pp-up">Up 賣價<b>—</b></div><div class="pp-ask" id="pp-dn">Down 賣價<b>—</b></div></div>
+    <div id="pp-body"><label class="pp-mode" id="pp-modebox"><input type="checkbox" id="pp-practice"> 練習模式（不花錢、不會下單）</label><div class="pp-asks"><div class="pp-ask" id="pp-up">Up 賣價<b>—</b></div><div class="pp-ask" id="pp-dn">Down 賣價<b>—</b></div><div class="pp-ask pp-lock" id="pp-lock">現在補<b>—</b><i></i></div></div>
     <div class="pp-msg" id="pp-msg">打開任何一場 BTC／ETH／SOL 5 分鐘盤</div>
     <button id="pp-go" class="pp-go" disabled>空白鍵</button>
     <div class="pp-row" id="pp-line"></div><div class="pp-row" id="pp-pos"></div><div class="pp-row" id="pp-stats"></div>
@@ -301,17 +301,13 @@
       st.trades.push({ side: "BUY", outcome: sg.side, price: f.price, size: f.shares, timestamp: now });
       flash(`練習：市價買 ${sg.side} ${f.shares.toFixed(2)} 股，均價 ${f.price.toFixed(3)}`, "ok");
     } else {
-      const a = best(mkt.tokens[sg.side], "ask");
-      st.leg2 = { price: sg.price, shares: sg.shares, s };
-      Object.assign(recOf(), { leg2_price: sg.price, leg2_shares: sg.shares, leg2_placed_s: s, leg2_taker: 0 });
-      if (a != null && a <= sg.price + 1e-9) {             // 掛單價已高於對面賣價：立刻吃單成交，要付手續費
-        const f = L.fillShares(askList(sg.side), sg.shares, sg.price);
-        if (f) {
-          st.trades.push({ side: "BUY", outcome: sg.side, price: f.price, size: f.shares, timestamp: now });
-          Object.assign(st.leg2, { taker: true, done: true }); Object.assign(recOf(), { leg2_taker: 1, leg2_fill_strict: 1 });
-          flash(`練習：第二張立刻吃單成交 ${f.shares.toFixed(2)} 股 @${f.price.toFixed(3)}（收手續費）`, "ok");
-        }
-      } else flash(`練習：掛 ${sg.side} 限價 ${sg.price.toFixed(2)} × ${sg.shares.toFixed(2)} 股，等對面跌下來`, "ok");
+      // 第二張：限價掛在當下賣價。盤口夠深就全部成交（吃單、收手續費）；不夠的股數照同一價格掛著，之後對面跌到這價格才成交（掛單、不收手續費）
+      const f = L.fillShares(askList(sg.side), sg.shares, sg.price);
+      st.leg2 = { price: sg.price, shares: sg.shares, s, filled: f ? f.shares : 0, taker: !!f };
+      Object.assign(recOf(), { leg2_price: sg.price, leg2_shares: sg.shares, leg2_placed_s: s, leg2_taker: f ? 1 : 0 });
+      if (f) st.trades.push({ side: "BUY", outcome: sg.side, price: f.price, size: f.shares, timestamp: now });
+      if (f && f.shares >= sg.shares - 1e-9) { st.leg2.done = true; recOf().leg2_fill_strict = 1; flash(`練習：第二張成交 ${sg.side} ${f.shares.toFixed(2)} 股 @${f.price.toFixed(3)}，本場成對`, "ok"); }
+      else flash(`練習：第二張先成交 ${(f ? f.shares : 0).toFixed(2)} 股，其餘 ${(sg.shares - (f ? f.shares : 0)).toFixed(2)} 股照 ${sg.price.toFixed(2)} 掛著等`, "ok");
     }
     save(); pos = L.positionFrom(st.trades); posToJournal();
   }
@@ -321,11 +317,13 @@
     const st = stOf(mkt.slug), lg = st.leg2; if (!lg || lg.done) return;
     const side = L.other(pos.first || ""), a = side ? best(mkt.tokens[side], "ask") : null;
     if (a != null && a <= lg.price - 0.01 + 1e-9) lg.strict = 1;
-    if (a == null || a > lg.price + 1e-9) return;
-    st.trades.push({ side: "BUY", outcome: side, price: lg.price, size: lg.shares, timestamp: Date.now() / 1000 });
-    lg.done = true; recOf().leg2_fill_strict = lg.strict ? 1 : 0;
+    // 這個價位如果已被我們吃過（部分成交），盤口上看到的那幾股其實已經沒了，要等對面跌破這價格才算剩下的成交
+    if (a == null || (lg.filled > 0 ? a >= lg.price - 1e-9 : a > lg.price + 1e-9)) return;
+    const left = lg.shares - (lg.filled || 0); if (left <= 1e-9) { lg.done = true; return; }
+    st.trades.push({ side: "BUY", outcome: side, price: lg.price, size: left, timestamp: Date.now() / 1000 });
+    lg.filled = lg.shares; lg.done = true; recOf().leg2_fill_strict = lg.strict ? 1 : 0;
     save(); pos = L.positionFrom(st.trades); posToJournal();
-    flash(`練習：第二張成交 ${side} ${lg.shares.toFixed(2)} 股 @${lg.price.toFixed(2)}，本場成對`, "ok");
+    flash(`練習：第二張剩下的 ${left.toFixed(2)} 股成交 @${lg.price.toFixed(2)}，本場成對`, "ok");
   }
 
   // ---------- 一鍵下單（人按了才執行；送出時一樣經過上面的檢查）----------
@@ -396,12 +394,20 @@
     const hot = x => d.suggest && d.suggest.side === x;
     $("#pp-up").innerHTML = `Up 賣價<b>${asks.Up == null ? "—" : asks.Up.toFixed(2)}</b>`; $("#pp-up").className = "pp-ask" + (hot("Up") ? " hot" : "");
     $("#pp-dn").innerHTML = `Down 賣價<b>${asks.Down == null ? "—" : asks.Down.toFixed(2)}</b>`; $("#pp-dn").className = "pp-ask" + (hot("Down") ? " hot" : "");
+    const lv = d.live, lk = $("#pp-lock");
+    if (lv && lv.kind === "lock") {
+      lk.innerHTML = `現在補 ${lv.side}<b>${lv.pct >= 0 ? "+" : ""}${(lv.pct * 100).toFixed(1)}%</b><i>每股 ${lv.perShare >= 0 ? "+" : ""}${(lv.perShare * 100).toFixed(1)} 分</i>`;
+      lk.className = "pp-ask pp-lock " + (lv.perShare > 0 ? "up" : "down");
+    } else if (lv && lv.kind === "sum") {
+      lk.innerHTML = `兩邊相加<b>${lv.sum.toFixed(2)}</b><i>買第一張後顯示利潤</i>`; lk.className = "pp-ask pp-lock";
+    } else { lk.innerHTML = `現在補<b>—</b><i></i>`; lk.className = "pp-ask pp-lock"; }
     const ready = practice() || !!cfg.addr, P = practice() ? "練習｜" : "";
     $("#pp-msg").textContent = ready ? P + d.msg : "先到插件設定填你的錢包地址（右鍵插件圖示 → 選項）";
     $("#pp-msg").className = "pp-msg " + (ready ? d.level : "stop");
     const go = $("#pp-go"), sg = ready ? d.suggest : null;
     go.disabled = !sg;
-    go.textContent = !sg ? "現在沒有可以做的" : P + (sg.kind === "market" ? `空白鍵：市價買 ${sg.side} $${sg.amount}（U／D 指定邊）` : `空白鍵：掛 ${sg.side} 限價 ${sg.price.toFixed(2)} × ${sg.shares.toFixed(2)} 股`);
+    go.textContent = !sg ? "現在沒有可以做的" : P + (sg.kind === "market" ? `空白鍵：市價買 ${sg.side} $${sg.amount}（U／D 指定邊）`
+      : `空白鍵：現在補 ${sg.side} ${sg.price.toFixed(2)} × ${sg.shares.toFixed(2)} 股（${lv && lv.kind === "lock" ? (lv.pct >= 0 ? "+" : "") + (lv.pct * 100).toFixed(1) + "%" : ""}）`);
     if (document.activeElement !== modeBox) modeBox.checked = practice();
     $("#pp-modebox").className = "pp-mode " + (practice() ? "sim" : "live");
     $("#pp-reset").style.display = d.phase === "waiting" ? "" : "none";

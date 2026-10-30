@@ -24,17 +24,22 @@ test("first leg: the human picks the moment; market only, fixed amount; nothing 
   d = L.decide(100, { Up: 0.30, Down: 0.71 }, empty, { LAST: 60 }); assert.strictEqual(d.phase, "late");
 });
 
-test("second leg: only the other side, as a limit order with the same shares; leg-1 side locked", () => {
-  const pos = L.positionFrom([buy("Up", 0.30, 16.66, 1793293515)]);
-  let d = L.decide(20, { Up: 0.33, Down: 0.70 }, pos);
+test("second leg: the human picks the moment; the third number is the live profit of locking now", () => {
+  const pos = L.positionFrom([buy("Up", 0.35, 14.29, 1793293515)]);
+  let d = L.decide(60, { Up: 0.40, Down: 0.70 }, pos);
   assert.strictEqual(d.phase, "second");
-  assert.deepStrictEqual(d.allow, { Up: false, Down: true });
-  assert.deepStrictEqual(d.limit.Down, { price: 0.61, shares: 16.66 });
-  assert.deepStrictEqual(d.suggest, { kind: "limit", side: "Down", price: 0.61, shares: 16.66 });
-  assert.strictEqual(d.market.Down, 0);                                       // 0.70 as a taker loses money
-  d = L.decide(20, { Up: 0.40, Down: 0.62 }, pos); assert.ok(d.market.Down > 0);  // a profitable taker fill is still allowed
-  d = L.decide(25, { Up: 0.40, Down: 0.62 }, pos, null, { leg2: { price: 0.61, shares: 16.66 } });
+  assert.deepStrictEqual(d.allow, { Up: false, Down: true });                       // leg-1 side locked
+  assert.ok(d.live.perShare < 0 && Math.abs(d.live.perShare - L.pairProfit(0.35, 0.70)) < 1e-12);  // shown even when it loses
+  assert.deepStrictEqual(d.suggest, { kind: "limit", side: "Down", price: 0.70, shares: 14.29 });
+  d = L.decide(60, { Up: 0.40, Down: 0.43 }, pos);
+  const want = L.pairProfit(0.35, 0.43) / (0.35 + 0.43 + L.fee(0.35) + L.fee(0.43));
+  assert.ok(Math.abs(d.live.pct - want) < 1e-12 && d.live.pct > 0.2);              // 0.35 + 0.43: about +23%
+  assert.strictEqual(d.level, "go");
+  d = L.decide(60, { Up: 0.40, Down: 0.555 }, pos); assert.strictEqual(d.limit.Down.price, 0.56);  // never below the ask
+  d = L.decide(25, { Up: 0.40, Down: 0.62 }, pos, null, { leg2: { price: 0.55, shares: 14.29 } });
   assert.strictEqual(d.phase, "waiting"); assert.deepStrictEqual(d.allow, { Up: false, Down: false });
+  assert.ok(d.live && d.live.kind === "lock");                                       // still shown while waiting
+  assert.deepStrictEqual(L.decide(20, { Up: 0.45, Down: 0.56 }, L.positionFrom([])).live, { kind: "sum", sum: 1.01 });
 });
 
 test("partial fills keep waiting; equal shares finish the game; settlement skips the maker fee", () => {
