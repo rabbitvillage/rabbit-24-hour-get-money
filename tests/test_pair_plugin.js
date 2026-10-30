@@ -30,12 +30,15 @@ test("second leg: the human picks the moment; the third number is the live profi
   assert.strictEqual(d.phase, "second");
   assert.deepStrictEqual(d.allow, { Up: false, Down: true });                       // leg-1 side locked
   assert.ok(d.live.perShare < 0 && Math.abs(d.live.perShare - L.pairProfit(0.35, 0.70)) < 1e-12);  // shown even when it loses
-  assert.deepStrictEqual(d.suggest, { kind: "limit", side: "Down", price: 0.70, shares: 14.29 });
+  assert.deepStrictEqual(d.suggest, { kind: "market", side: "Down", shares: 14.29, amount: 10.01, price: 0.70 });   // press = buy now, no resting order
   d = L.decide(60, { Up: 0.40, Down: 0.43 }, pos);
   const want = L.pairProfit(0.35, 0.43) / (0.35 + 0.43 + L.fee(0.35) + L.fee(0.43));
   assert.ok(Math.abs(d.live.pct - want) < 1e-12 && d.live.pct > 0.2);              // 0.35 + 0.43: about +23%
   assert.strictEqual(d.level, "go");
-  d = L.decide(60, { Up: 0.40, Down: 0.555 }, pos); assert.strictEqual(d.limit.Down.price, 0.56);  // never below the ask
+  d = L.decide(60, { Up: 0.40, Down: 0.555 }, pos); assert.strictEqual(d.limit.Down.price, 0.56);  // a manual limit may go up to the ask
+  d = L.decide(60, { Up: 0.40, Down: 0.52 }, pos, { fillPrice: 0.5332 });            // thin book: the third number uses the average fill
+  assert.ok(Math.abs(d.live.perShare - L.pairProfit(0.35, 0.5332)) < 1e-12 && d.suggest.amount === Math.ceil(14.29 * 0.5332 * 100) / 100);
+  assert.ok(d.market.Down >= d.suggest.amount);
   d = L.decide(25, { Up: 0.40, Down: 0.62 }, pos, null, { leg2: { price: 0.55, shares: 14.29 } });
   assert.strictEqual(d.phase, "waiting"); assert.deepStrictEqual(d.allow, { Up: false, Down: false });
   assert.ok(d.live && d.live.kind === "lock");                                       // still shown while waiting
@@ -87,4 +90,12 @@ test("practice fills walk the real book: dollars for leg 1, shares capped at the
   assert.ok(Math.abs(g.shares - 12) < 1e-9 && Math.abs(g.price - (4 + 0.84) / 12) < 1e-9);
   const h = L.fillShares(asks, 20, 0.42); assert.ok(Math.abs(h.shares - 15) < 1e-9);   // only 15 at or under the limit
   assert.strictEqual(L.fillShares(asks, 5, 0.39), null);
+});
+
+test("market fills leave a few odd shares: within 3% still counts as a pair", () => {
+  const pos = L.positionFrom([buy("Up", 0.35, 14.29, 1), buy("Down", 0.55, 13.95, 9)]);   // 0.34 short (2.4%)
+  assert.strictEqual(L.decide(60, { Up: 0.4, Down: 0.6 }, pos).phase, "done");
+  assert.ok(L.settle(pos, "Up").paired);
+  const far = L.positionFrom([buy("Up", 0.35, 14.29, 1), buy("Down", 0.55, 10, 9)]);
+  assert.strictEqual(L.decide(60, { Up: 0.4, Down: 0.6 }, far).phase, "second");
 });

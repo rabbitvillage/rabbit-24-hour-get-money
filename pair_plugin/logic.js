@@ -2,12 +2,14 @@
 // 人工模式（fish 2026-10-30）：
 //   第一張：什麼時候買、買哪一邊由人決定，只能用市價（1-Tap 或市價單），金額固定，不准放大。
 //   第二張：什麼時候補也由人決定。面板第三個數字即時顯示「現在補對面能賺幾 %」（含兩張手續費），
-//           人按空白鍵就用對面當下賣價、同樣股數鎖定（限價單掛在當下賣價，等於立刻成交）。
+//           人按空白鍵就直接買（市價），照賣單吃到和第一張一樣的股數，不留掛單。
 //   抱到結算拿 $1。同一場只做一組；不准加買第一張那一邊。
 var PairLogic = (function () {
   const FEE_RATE = 0.07;                         // Polymarket 加密盤吃單手續費：7% × p × (1 − p) × 股數，另外加收；掛單不收
   const DEFAULTS = { AMOUNT: 5, MARGIN: 0.07, LAST: 240, LEG2_SLACK: 0.03 };   // MARGIN 只剩 leg2Price 用（舊查詢與測試），面板已不用
   const EPS_SH = 0.05;                           // 兩邊股數差在這以內就算成對（市價買會有零碎股數）
+  // 市價按金額買，價格一動股數會差一點點：差距在 0.05 股或 3% 以內都算成對，不再要你補零頭
+  const pairedTol = (a, b) => Math.max(EPS_SH, 0.03 * Math.max(a, b));
 
   function fee(p) { return FEE_RATE * p * (1 - p); }
   function pairProfit(p1, p2) { return 1 - p1 - p2 - fee(p1) - fee(p2); }       // 兩張都吃單
@@ -48,7 +50,7 @@ var PairLogic = (function () {
   function decide(sFromOpen, asks, pos, cfg, st) {
     cfg = Object.assign({}, DEFAULTS, cfg || {}); st = st || {};
     const res = { phase: "", msg: "", level: "wait", allow: { Up: false, Down: false }, market: { Up: 0, Down: 0 }, limit: { Up: null, Down: null }, suggest: null };
-    if (pos.Up.shares > 0 && pos.Down.shares > 0 && Math.abs(pos.Up.shares - pos.Down.shares) <= EPS_SH) {
+    if (pos.Up.shares > 0 && pos.Down.shares > 0 && Math.abs(pos.Up.shares - pos.Down.shares) <= pairedTol(pos.Up.shares, pos.Down.shares)) {
       const s1 = pos.first, s2 = other(s1), sh = Math.min(pos.Up.shares, pos.Down.shares);
       const locked = sh * (1 - pos.Up.avg - pos.Down.avg) - pos[s1].shares * fee(pos[s1].avg) - (st.leg2 ? 0 : pos[s2].shares * fee(pos[s2].avg));
       res.phase = "done"; res.level = "done";
@@ -73,20 +75,22 @@ var PairLogic = (function () {
     const s1 = pos.first, s2 = other(s1), p1 = pos[s1].avg, a2 = asks[s2];
     const need = Math.floor((pos[s1].shares - pos[s2].shares) * 100) / 100;
     res.phase = "second"; res.need = need;
-    if (need < EPS_SH) { res.phase = "done"; res.level = "done"; res.msg = "兩邊股數已一樣，本場不再下單。"; return res; }
-    if (a2 != null) res.live = lockNow(p1, a2, s2);
+    if (need <= pairedTol(pos[s1].shares, pos[s2].shares)) { res.phase = "done"; res.level = "done"; res.msg = "兩邊股數已一樣，本場不再下單。"; return res; }
+    const fp = cfg.fillPrice != null ? cfg.fillPrice : a2;     // 買滿 need 股的平均價（content 照盤口算；沒有就用最佳賣價）
+    if (a2 != null) res.live = lockNow(p1, fp, s2);
     if (st.leg2 && !st.leg2.done) {
       res.phase = "waiting";
       res.msg = `第二張已送出：${s2} 限價 ${f2(st.leg2.price)} × ${st.leg2.shares.toFixed(2)} 股，已成交 ${pos[s2].shares.toFixed(2)} 股（價格跑掉沒成交就會掛著等）。不准加買 ${s1}。`;
       return res;
     }
     if (a2 == null) { res.msg = `已買 ${s1} ${pos[s1].shares.toFixed(2)} 股 @${p1.toFixed(3)}。等 ${s2} 的報價。`; return res; }
-    const lp = Math.ceil(a2 * 100 - 1e-9) / 100;            // 限價取整到 1 分、不低於賣價，送出就會成交
+    const lp = Math.ceil(a2 * 100 - 1e-9) / 100;            // 自己手動掛限價時的上限：不高於賣價
+    const amt = Math.ceil(need * fp * 100 - 1e-9) / 100;      // 直接買要花的錢（照盤口買滿 need 股）
     res.allow[s2] = true; res.limit[s2] = { price: lp, shares: need };
-    res.market[s2] = Math.round(need * a2 * (1 + cfg.LEG2_SLACK) * 100) / 100;
-    res.suggest = { kind: "limit", side: s2, price: lp, shares: need };
+    res.market[s2] = Math.round(Math.max(amt, need * a2) * (1 + cfg.LEG2_SLACK) * 100) / 100;
+    res.suggest = { kind: "market", side: s2, shares: need, amount: amt, price: fp };
     res.level = res.live.perShare > 0 ? "go" : "ready";
-    res.msg = `已買 ${s1} ${pos[s1].shares.toFixed(2)} 股 @${p1.toFixed(3)}。什麼時候補你決定：空白鍵＝現在用 ${s2} ${f2(a2)} 買 ${need.toFixed(2)} 股鎖定` +
+    res.msg = `已買 ${s1} ${pos[s1].shares.toFixed(2)} 股 @${p1.toFixed(3)}。什麼時候補你決定：空白鍵＝現在直接買 ${s2} ${need.toFixed(2)} 股（均價約 ${fp.toFixed(3)}，約 $${amt.toFixed(2)}）` +
       `（${res.live.perShare >= 0 ? "賺" : "虧"} ${Math.abs(res.live.pct * 100).toFixed(1)}%）。${s2} 跌到 ${f2(leg2Cap(p1))} 以下才開始賺。不准加買 ${s1}。`;
     return res;
   }
@@ -103,7 +107,7 @@ var PairLogic = (function () {
     let fees = 0;
     for (const o of ["Up", "Down"]) if (pos[o].shares && !(leg2Maker && o !== pos.first)) fees += fee(pos[o].avg) * pos[o].shares;
     const payout = winner === "Up" ? pos.Up.shares : winner === "Down" ? pos.Down.shares : 0;
-    const paired = pos.Up.shares > 0 && pos.Down.shares > 0 && Math.abs(pos.Up.shares - pos.Down.shares) <= EPS_SH;
+    const paired = pos.Up.shares > 0 && pos.Down.shares > 0 && Math.abs(pos.Up.shares - pos.Down.shares) <= pairedTol(pos.Up.shares, pos.Down.shares);
     return { cost, fees, payout, pnl: payout - cost - fees, paired };
   }
 

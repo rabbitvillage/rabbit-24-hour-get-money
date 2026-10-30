@@ -2,7 +2,7 @@
 // 練習模式（預設開）：按鍵不碰頁面上的下單按鈕，改用當下真實盤口模擬成交，收盤後照真實結果算損益；不花錢。
 // 插件只在人按鍵或點按鈕時才動作，不會自己下單：
 //   第一張：人決定時機，空白鍵＝市價買較便宜的那邊（U／D 鍵指定邊），金額固定。
-//   第二張：時機由人決定。面板第三格即時顯示「現在補對面能賺幾 %」；空白鍵＝用對面當下賣價、同樣股數鎖定。
+//   第二張：時機由人決定。面板第三格即時顯示「現在補對面能賺幾 %」；空白鍵＝直接買（市價）對面同樣股數，不留掛單。
 (function () {
   "use strict";
   const L = PairLogic;
@@ -295,7 +295,13 @@
   const askList = side => { const b = book[mkt.tokens[side]]; return b ? [...b.asks].map(([p, z]) => [p, z]) : []; };
   function simExec(sg) {
     const st = stOf(mkt.slug), now = Date.now() / 1000, s = now - mkt.start;
-    if (sg.kind === "market") {
+    if (sg.kind === "market" && sg.shares != null) {      // 第二張直接買：照賣單吃到同樣股數，不留掛單
+      const f = L.fillShares(askList(sg.side), sg.shares, Infinity); if (!f) return flash("練習：對面沒有賣單");
+      st.trades.push({ side: "BUY", outcome: sg.side, price: f.price, size: f.shares, timestamp: now });
+      Object.assign(recOf(), { leg2_price: f.price, leg2_shares: sg.shares, leg2_placed_s: s, leg2_taker: 1, leg2_fill_strict: 1 });
+      flash(f.shares >= sg.shares - 1e-9 ? `練習：直接買 ${sg.side} ${f.shares.toFixed(2)} 股，均價 ${f.price.toFixed(3)}，本場成對`
+                                          : `練習：賣單不夠，只買到 ${f.shares.toFixed(2)} 股（均價 ${f.price.toFixed(3)}）`, "ok");
+    } else if (sg.kind === "market") {
       const f = L.fillMarket(askList(sg.side), sg.amount); if (!f) return flash("練習：盤口不夠深，吃不到 $" + sg.amount);
       recordClick(sg.side);
       st.trades.push({ side: "BUY", outcome: sg.side, price: f.price, size: f.shares, timestamp: now });
@@ -341,7 +347,7 @@
     try {
       const buyTab = radios(/^(買入|Buy)$/i)[0]; if (buyTab && !isOn(buyTab)) { buyTab.click(); await sleep(120); }
       if (sg.kind === "market") {
-        const tapOk = await setMode("tap");
+        const tapOk = sg.shares == null && await setMode("tap");   // 第二張金額不是整數，直接用市價單
         const ob = outcomeRadios().find(b => new RegExp("^" + sg.side + "\\b", "i").test(norm(b))); if (!ob) return flash(`找不到「${sg.side}」按鈕`);
         if (!isOn(ob)) { ob.click(); await sleep(150); }
         const t = tapOk && findOneTap(sg.amount); if (t) { t.click(); return; }
@@ -387,7 +393,12 @@
     const s = Date.now() / 1000 - mkt.start, asks = asksNow();
     const si = Math.floor(s); if (!hist.length || hist[hist.length - 1][0] !== si) { hist.push([si, asks.Up, asks.Down]); if (hist.length > 400) hist.shift(); }
     simTick(s);
-    const st = stOf(mkt.slug), d = L.decide(s, asks, pos, lcfg(), st);
+    let fillPrice = null;                                     // 第二張買滿同樣股數的平均價（照盤口）
+    if (pos.first) {
+      const s1 = pos.first, s2 = L.other(s1), need = pos[s1].shares - pos[s2].shares;
+      const f = need > 0 ? L.fillShares(askList(s2), need, Infinity) : null; if (f) fillPrice = f.price;
+    }
+    const st = stOf(mkt.slug), d = L.decide(s, asks, pos, Object.assign(lcfg(), { fillPrice }), st);
     lastDecision = d;
     const hh = new Date(mkt.start * 1000); $("#pp-title").textContent = `${mkt.asset} ${String(hh.getHours()).padStart(2, "0")}:${String(hh.getMinutes()).padStart(2, "0")} 場`;
     $("#pp-time").textContent = s < 0 ? `開盤前 ${Math.ceil(-s)}s` : `開盤後 +${Math.floor(s)}s`;
@@ -406,8 +417,8 @@
     $("#pp-msg").className = "pp-msg " + (ready ? d.level : "stop");
     const go = $("#pp-go"), sg = ready ? d.suggest : null;
     go.disabled = !sg;
-    go.textContent = !sg ? "現在沒有可以做的" : P + (sg.kind === "market" ? `空白鍵：市價買 ${sg.side} $${sg.amount}（U／D 指定邊）`
-      : `空白鍵：現在補 ${sg.side} ${sg.price.toFixed(2)} × ${sg.shares.toFixed(2)} 股（${lv && lv.kind === "lock" ? (lv.pct >= 0 ? "+" : "") + (lv.pct * 100).toFixed(1) + "%" : ""}）`);
+    go.textContent = !sg ? "現在沒有可以做的" : P + (sg.kind === "market" && sg.shares == null ? `空白鍵：市價買 ${sg.side} $${sg.amount}（U／D 指定邊）`
+      : `空白鍵：直接買 ${sg.side} ${sg.shares.toFixed(2)} 股（${lv && lv.kind === "lock" ? (lv.pct >= 0 ? "+" : "") + (lv.pct * 100).toFixed(1) + "%" : ""}）`);
     if (document.activeElement !== modeBox) modeBox.checked = practice();
     $("#pp-modebox").className = "pp-mode " + (practice() ? "sim" : "live");
     $("#pp-reset").style.display = d.phase === "waiting" ? "" : "none";
