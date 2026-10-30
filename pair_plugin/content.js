@@ -390,16 +390,21 @@
     try { mkt = await loadMarket(m[1]); } catch (e) { mkt = null; }
     connect(); connectCl(); loadTrades();
   }
+  // 只在內容真的變了才寫進面板：避免每 0.25 秒整塊重寫，讓 Polymarket 自己的倒數動畫跟著重新排版（fish 10-30 遇到倒數顯示 16 分）
+  const $ = s => panel.querySelector(s);
+  const setT = (sel, v) => { const e = $(sel); if (e && e.textContent !== v) e.textContent = v; };
+  const setH = (sel, v) => { const e = $(sel); if (e && e.__h !== v) { e.innerHTML = v; e.__h = v; } };
+  const setC = (sel, v) => { const e = $(sel); if (e && e.className !== v) e.className = v; };
+  const setD = (sel, v) => { const e = $(sel); if (e && e.style.display !== v) e.style.display = v; };
   function render() {
     mount();
-    const $ = s => panel.querySelector(s);
     if (!alive()) {                                   // 舊版程式：停用並提示
-      $("#pp-title").textContent = `開盤配對助手 v${VER}（舊版，已停用）`;
-      $("#pp-msg").textContent = "插件已更新：請按 Cmd+R 重新整理這一頁，才會換成新版。舊版已停止接管空白鍵和下單按鈕。";
-      $("#pp-msg").className = "pp-msg stop"; $("#pp-go").disabled = true; $("#pp-go").textContent = "請按 Cmd+R 重新整理頁面";
+      setT("#pp-title", `開盤配對助手 v${VER}（舊版，已停用）`);
+      setT("#pp-msg", "插件已更新：請按 Cmd+R 重新整理這一頁，才會換成新版。舊版已停止接管空白鍵和下單按鈕。");
+      setC("#pp-msg", "pp-msg stop"); $("#pp-go").disabled = true; setT("#pp-go", "請按 Cmd+R 重新整理頁面");
       lastDecision = null; return;
     }
-    if (!mkt) { $("#pp-title").textContent = `開盤配對助手 v${VER}`; $("#pp-time").textContent = ""; $("#pp-msg").textContent = "打開任何一場 BTC／ETH／SOL 5 分鐘盤"; $("#pp-msg").className = "pp-msg"; $("#pp-go").disabled = true; lastDecision = null; return; }
+    if (!mkt) { setT("#pp-title", `開盤配對助手 v${VER}`); setT("#pp-time", ""); setT("#pp-msg", "打開任何一場 BTC／ETH／SOL 5 分鐘盤"); setC("#pp-msg", "pp-msg"); $("#pp-go").disabled = true; lastDecision = null; return; }
     const s = Date.now() / 1000 - mkt.start, asks = asksNow();
     const si = Math.floor(s); if (!hist.length || hist[hist.length - 1][0] !== si) { hist.push([si, asks.Up, asks.Down]); if (hist.length > 400) hist.shift(); }
     simTick(s);
@@ -410,21 +415,21 @@
     }
     const st = stOf(mkt.slug), d = L.decide(s, asks, pos, Object.assign(lcfg(), { fillPrice }), st);
     lastDecision = d;
-    const hh = new Date(mkt.start * 1000); $("#pp-title").textContent = `${mkt.asset} ${String(hh.getHours()).padStart(2, "0")}:${String(hh.getMinutes()).padStart(2, "0")} 場 · v${VER}`;
-    $("#pp-time").textContent = s < 0 ? `開盤前 ${Math.ceil(-s)}s` : `開盤後 +${Math.floor(s)}s`;
+    const hh = new Date(mkt.start * 1000); setT("#pp-title", `${mkt.asset} ${String(hh.getHours()).padStart(2, "0")}:${String(hh.getMinutes()).padStart(2, "0")} 場 · v${VER}`);
+    setT("#pp-time", s < 0 ? `開盤前 ${Math.ceil(-s)}s` : `開盤後 +${Math.floor(s)}s`);
     const hot = x => d.suggest && d.suggest.side === x;
     const dr = { Up: L.recentDrop(hist, "Up", s), Down: L.recentDrop(hist, "Down", s) };
     const drTxt = x => x == null ? "近20秒：資料不足" : x.drop >= 0.005 ? `近20秒跌 ${x.drop.toFixed(2)}` : "近20秒沒跌";
     const drCls = x => x == null ? "" : x.drop >= L.DROP_MIN - 1e-9 ? " deep" : " shallow";
-    $("#pp-up").innerHTML = `Up 賣價<b>${asks.Up == null ? "—" : asks.Up.toFixed(2)}</b><i>${drTxt(dr.Up)}</i>`; $("#pp-up").className = "pp-ask" + (hot("Up") ? " hot" : "") + drCls(dr.Up);
-    $("#pp-dn").innerHTML = `Down 賣價<b>${asks.Down == null ? "—" : asks.Down.toFixed(2)}</b><i>${drTxt(dr.Down)}</i>`; $("#pp-dn").className = "pp-ask" + (hot("Down") ? " hot" : "") + drCls(dr.Down);
-    const lv = d.live, lk = $("#pp-lock");
+    setH("#pp-up", `Up 賣價<b>${asks.Up == null ? "—" : asks.Up.toFixed(2)}</b><i>${drTxt(dr.Up)}</i>`); setC("#pp-up", "pp-ask" + (hot("Up") ? " hot" : "") + drCls(dr.Up));
+    setH("#pp-dn", `Down 賣價<b>${asks.Down == null ? "—" : asks.Down.toFixed(2)}</b><i>${drTxt(dr.Down)}</i>`); setC("#pp-dn", "pp-ask" + (hot("Down") ? " hot" : "") + drCls(dr.Down));
+    const lv = d.live;
     if (lv && lv.kind === "lock") {
-      lk.innerHTML = `現在補 ${lv.side}<b>${lv.pct >= 0 ? "+" : ""}${(lv.pct * 100).toFixed(1)}%</b><i>每股 ${lv.perShare >= 0 ? "+" : ""}${(lv.perShare * 100).toFixed(1)} 分</i>`;
-      lk.className = "pp-ask pp-lock " + (lv.perShare > 0 ? "up" : "down");
+      setH("#pp-lock", `現在補 ${lv.side}<b>${lv.pct >= 0 ? "+" : ""}${(lv.pct * 100).toFixed(1)}%</b><i>每股 ${lv.perShare >= 0 ? "+" : ""}${(lv.perShare * 100).toFixed(1)} 分</i>`);
+      setC("#pp-lock", "pp-ask pp-lock " + (lv.perShare > 0 ? "up" : "down"));
     } else if (lv && lv.kind === "sum") {
-      lk.innerHTML = `兩邊相加<b>${lv.sum.toFixed(2)}</b><i>買第一張後顯示利潤</i>`; lk.className = "pp-ask pp-lock";
-    } else { lk.innerHTML = `現在補<b>—</b><i></i>`; lk.className = "pp-ask pp-lock"; }
+      setH("#pp-lock", `兩邊相加<b>${lv.sum.toFixed(2)}</b><i>買第一張後顯示利潤</i>`); setC("#pp-lock", "pp-ask pp-lock");
+    } else { setH("#pp-lock", `現在補<b>—</b><i></i>`); setC("#pp-lock", "pp-ask pp-lock"); }
     const ready = practice() || !!cfg.addr, P = practice() ? "練習｜" : "";
     let warnTxt = "";
     if (d.phase === "first" && d.suggest) {
@@ -432,26 +437,27 @@
       warnTxt = x == null ? `　⚠ 近 20 秒資料不足，看不出 ${d.suggest.side} 跌了多少。`
         : x.drop < L.DROP_MIN - 1e-9 ? `　⚠ ${d.suggest.side} 近 20 秒只跌 ${x.drop.toFixed(2)}（成功的場次多半跌 0.10 以上才買；輸的 11:10 那場只跌 0.06）。` : "";
     }
-    $("#pp-msg").textContent = ready ? P + d.msg + warnTxt : "先到插件設定填你的錢包地址（右鍵插件圖示 → 選項）";
-    $("#pp-msg").className = "pp-msg " + (ready ? d.level : "stop");
+    setT("#pp-msg", ready ? P + d.msg + warnTxt : "先到插件設定填你的錢包地址（右鍵插件圖示 → 選項）");
+    setC("#pp-msg", "pp-msg " + (ready ? d.level : "stop"));
     const go = $("#pp-go"), sg = ready ? d.suggest : null;
-    go.disabled = !sg; go.classList.toggle("warn", !!warnTxt);
-    go.textContent = !sg ? "現在沒有可以做的" : P + (sg.kind === "market" && sg.shares == null ? `空白鍵：市價買 ${sg.side} $${sg.amount}（U／D 指定邊）`
-      : `空白鍵：直接買 ${sg.side} ${sg.shares.toFixed(2)} 股（${lv && lv.kind === "lock" ? (lv.pct >= 0 ? "+" : "") + (lv.pct * 100).toFixed(1) + "%" : ""}）`);
-    if (document.activeElement !== modeBox) modeBox.checked = practice();
-    $("#pp-modebox").className = "pp-mode " + (practice() ? "sim" : "live");
-    $("#pp-reset").style.display = d.phase === "waiting" ? "" : "none";
+    if (go.disabled !== !sg) go.disabled = !sg;
+    if (go.classList.contains("warn") !== !!warnTxt) go.classList.toggle("warn", !!warnTxt);
+    setT("#pp-go", !sg ? "現在沒有可以做的" : P + (sg.kind === "market" && sg.shares == null ? `空白鍵：市價買 ${sg.side} $${sg.amount}（U／D 指定邊）`
+      : `空白鍵：直接買 ${sg.side} ${sg.shares.toFixed(2)} 股（${lv && lv.kind === "lock" ? (lv.pct >= 0 ? "+" : "") + (lv.pct * 100).toFixed(1) + "%" : ""}）`));
+    if (document.activeElement !== modeBox && modeBox.checked !== practice()) modeBox.checked = practice();
+    setC("#pp-modebox", "pp-mode " + (practice() ? "sim" : "live"));
+    setD("#pp-reset", d.phase === "waiting" ? "" : "none");
     const cl = clNow(), dl = L.distance(cl, clLine, "Up", s);
-    $("#pp-reset").textContent = practice() ? "取消練習的第二張掛單" : "第二張重掛（先在頁面上取消舊掛單）";
-    $("#pp-line").textContent = cl == null ? "幣價：連線中…" : clLine == null ? `幣價 ${cl.toFixed(2)}｜開盤線：要在開盤前 1 分鐘內打開頁面才算得出來（收盤後紀錄會補官方值）`
-      : `幣價 ${cl.toFixed(2)}｜離開盤線 ${dl.usd >= 0 ? "+" : ""}${dl.usd.toFixed(2)}（${dl.usd >= 0 ? "偏 Up" : "偏 Down"}，標準化 ${dl.z.toFixed(2)}）`;
-    $("#pp-pos").textContent = `部位：Up ${pos.Up.shares.toFixed(2)} 股${pos.Up.avg ? " @" + pos.Up.avg.toFixed(3) : ""}｜Down ${pos.Down.shares.toFixed(2)} 股${pos.Down.avg ? " @" + pos.Down.avg.toFixed(3) : ""}`;
+    setT("#pp-reset", practice() ? "取消練習的第二張掛單" : "第二張重掛（先在頁面上取消舊掛單）");
+    setT("#pp-line", cl == null ? "幣價：連線中…" : clLine == null ? `幣價 ${cl.toFixed(2)}｜開盤線：要在開盤前 1 分鐘內打開頁面才算得出來（收盤後紀錄會補官方值）`
+      : `幣價 ${cl.toFixed(2)}｜離開盤線 ${dl.usd >= 0 ? "+" : ""}${dl.usd.toFixed(2)}（${dl.usd >= 0 ? "偏 Up" : "偏 Down"}，標準化 ${dl.z.toFixed(2)}）`);
+    setT("#pp-pos", `部位：Up ${pos.Up.shares.toFixed(2)} 股${pos.Up.avg ? " @" + pos.Up.avg.toFixed(3) : ""}｜Down ${pos.Down.shares.toFixed(2)} 股${pos.Down.avg ? " @" + pos.Down.avg.toFixed(3) : ""}`);
     const today = new Date().toISOString().slice(0, 10); const rs = Object.values(settledMap()).filter(r => r.day === today);
     const tag = practice() ? "今日練習" : "今日真實";
     if (rs.length) {
       const pnl = rs.reduce((a, r) => a + r.pnl, 0), paired = rs.filter(r => r.paired).length;
-      $("#pp-stats").textContent = `${tag}：${rs.length} 場，成對 ${paired}、沒補到 ${rs.length - paired}，損益 ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`;
-    } else $("#pp-stats").textContent = `${tag}：尚無結算`;
+      setT("#pp-stats", `${tag}：${rs.length} 場，成對 ${paired}、沒補到 ${rs.length - paired}，損益 ${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`);
+    } else setT("#pp-stats", `${tag}：尚無結算`);
   }
   setInterval(() => { if (location.pathname !== lastPath) onRoute(); render(); }, 250);
   setInterval(() => { loadTrades(); checkSettled(); }, 2000);

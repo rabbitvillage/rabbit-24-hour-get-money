@@ -1,4 +1,5 @@
-#pp-panel{position:fixed;top:90px;right:16px;z-index:2147483647;width:330px;font:13px/1.45 -apple-system,"PingFang TC",sans-serif;
+/* contain：面板內容怎麼變都不讓整個網頁重新排版（避免干擾 Polymarket 的倒數動畫） */
+#pp-panel{contain:layout style paint;position:fixed;top:90px;right:16px;z-index:2147483647;width:330px;font:13px/1.45 -apple-system,"PingFang TC",sans-serif;
   background:#111827;color:#f9fafb;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.35);padding:12px 14px;user-select:none}
 #pp-panel .pp-h{display:flex;justify-content:space-between;align-items:center;font-weight:600;margin-bottom:6px;cursor:move}
 #pp-panel .pp-t{font-variant-numeric:tabular-nums;color:#9ca3af;font-weight:500}
@@ -13,7 +14,7 @@
 #pp-panel .pp-row{color:#d1d5db;font-size:12px;margin-top:4px}
 #pp-panel .pp-warn{color:#fca5a5;font-size:12px;margin-top:4px;min-height:16px}
 #pp-panel .pp-x{cursor:pointer;color:#9ca3af;font-weight:400}
-#pp-flash{position:fixed;left:50%;top:20px;transform:translateX(-50%);z-index:2147483647;background:#b91c1c;color:#fff;
+#pp-flash{contain:layout style paint;position:fixed;left:50%;top:20px;transform:translateX(-50%);z-index:2147483647;background:#b91c1c;color:#fff;
   font:600 15px -apple-system,"PingFang TC",sans-serif;padding:10px 16px;border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.35)}
 #pp-panel .pp-go{width:100%;margin:6px 0 2px;padding:12px;font:700 16px -apple-system,"PingFang TC",sans-serif;border:0;border-radius:10px;
   background:#10b981;color:#062e22;cursor:pointer}
