@@ -3,6 +3,7 @@
   B 目標＋停損：同 A，但第一張那邊再跌 D（賣價 ≤ p1 − D）時，立刻用對面現價補（鎖小虧，不抱單邊到 0）。
   C 目標隨時間降低：買後 0 秒要 T，之後每過 60 秒少 STEP，最低降到 FLOOR（可以是負的＝願意小虧補）。
   D 收盤前保底：同 A，但到開盤後 X 秒還沒補，就用對面現價補（不管賺賠）。
+  E 不算手續費的帳面門檻（fish 的看法）：兩邊相加 ≤ 1 − G（帳面每股賺 ≥ G）就補；同時列出扣手續費後每對平均剩多少。
 沒補到就抱到結算。資料：/opt/pm-pair/data 全部場次。用法：cd /opt/pm-pair/data && python3 -I ../pair_leg2_rules.py
 """
 import csv, glob, gzip, itertools
@@ -65,3 +66,19 @@ for T, STEP, FLOOR in itertools.product((0.10, 0.15), (0.05, 0.10), (0.0, -0.05,
 print("== D 目標＋時間到就補（開盤後 X 秒還沒補，用對面現價補）==")
 for T, X in itertools.product((0.05, 0.10, 0.15), (150, 200, 250)):
     print(f"  目標 {T*100:>3.0f} 分、第 {X} 秒保底        | " + sim(lambda p1, t1, t, o, me, T=T, X=X: net(p1, o) >= T or t >= X))
+
+print("== E 不算手續費的帳面門檻（相加 ≤ 1 − G 就補）==")
+for G in (0.03, 0.05, 0.07, 0.09, 0.12, 0.15, 0.20):
+    c = defaultdict(int); pnl = cost = gross = netp = 0.0
+    for rows, win, (i, side, p1, t1) in E:
+        k1, k2 = (1, 2) if side == "Up" else (2, 1); res = None
+        for r in rows[i + 1:]:
+            if r[0] > 299: break
+            o = r[k2]
+            if o is not None and 1 - p1 - o >= G - 1e-9: res = o; break
+        if res is not None:
+            c["pair"] += 1; v = net(p1, res); pnl += v; cost += p1 + res + fee(p1) + fee(res); gross += 1 - p1 - res; netp += v
+        else:
+            won = side == win; c["won" if won else "lost"] += 1; v = (1 - p1 if won else -p1) - fee(p1); pnl += v; cost += p1 + fee(p1)
+    n = len(E); pr = c["pair"]
+    print(f"  帳面 ≥ {G*100:>3.0f} 分就補 | 配成 {pr/n:>4.0%}  單邊輸 {c['lost']:>3} | 每對平均：帳面 {gross/pr*100:>4.1f} 分、扣手續費後 {netp/pr*100:>+5.1f} 分 | 每$1 {pnl/cost:>+6.1%}")
