@@ -256,7 +256,8 @@
     const s = Date.now() / 1000 - mkt.start, a = asksNow();
     const path = hist.filter(h => h[0] >= s - 60).filter((h, i) => i % 2 === 0).map(h => `${h[0]}:${h[1] ?? ""}/${h[2] ?? ""}`).join(";");
     const cl = clNow(), dd = L.distance(cl, clLine, side, s);
-    Object.assign(recOf(), { click_s: s, click_side: side, click_up_ask: a.Up, click_dn_ask: a.Down, path60: path, cl_click: cl },
+    const dr = L.recentDrop(hist, side, s);
+    Object.assign(recOf(), { click_s: s, click_side: side, click_up_ask: a.Up, click_dn_ask: a.Down, path60: path, cl_click: cl, drop20: dr ? dr.drop : null },
                   clLine != null ? { line: clLine, line_src: "live" } : {}, dd ? { dist_usd: dd.usd, dist_bps: dd.bps, dist_z: dd.z } : {});
     save();
   }
@@ -412,8 +413,11 @@
     const hh = new Date(mkt.start * 1000); $("#pp-title").textContent = `${mkt.asset} ${String(hh.getHours()).padStart(2, "0")}:${String(hh.getMinutes()).padStart(2, "0")} 場 · v${VER}`;
     $("#pp-time").textContent = s < 0 ? `開盤前 ${Math.ceil(-s)}s` : `開盤後 +${Math.floor(s)}s`;
     const hot = x => d.suggest && d.suggest.side === x;
-    $("#pp-up").innerHTML = `Up 賣價<b>${asks.Up == null ? "—" : asks.Up.toFixed(2)}</b>`; $("#pp-up").className = "pp-ask" + (hot("Up") ? " hot" : "");
-    $("#pp-dn").innerHTML = `Down 賣價<b>${asks.Down == null ? "—" : asks.Down.toFixed(2)}</b>`; $("#pp-dn").className = "pp-ask" + (hot("Down") ? " hot" : "");
+    const dr = { Up: L.recentDrop(hist, "Up", s), Down: L.recentDrop(hist, "Down", s) };
+    const drTxt = x => x == null ? "近20秒：資料不足" : x.drop >= 0.005 ? `近20秒跌 ${x.drop.toFixed(2)}` : "近20秒沒跌";
+    const drCls = x => x == null ? "" : x.drop >= L.DROP_MIN - 1e-9 ? " deep" : " shallow";
+    $("#pp-up").innerHTML = `Up 賣價<b>${asks.Up == null ? "—" : asks.Up.toFixed(2)}</b><i>${drTxt(dr.Up)}</i>`; $("#pp-up").className = "pp-ask" + (hot("Up") ? " hot" : "") + drCls(dr.Up);
+    $("#pp-dn").innerHTML = `Down 賣價<b>${asks.Down == null ? "—" : asks.Down.toFixed(2)}</b><i>${drTxt(dr.Down)}</i>`; $("#pp-dn").className = "pp-ask" + (hot("Down") ? " hot" : "") + drCls(dr.Down);
     const lv = d.live, lk = $("#pp-lock");
     if (lv && lv.kind === "lock") {
       lk.innerHTML = `現在補 ${lv.side}<b>${lv.pct >= 0 ? "+" : ""}${(lv.pct * 100).toFixed(1)}%</b><i>每股 ${lv.perShare >= 0 ? "+" : ""}${(lv.perShare * 100).toFixed(1)} 分</i>`;
@@ -422,10 +426,16 @@
       lk.innerHTML = `兩邊相加<b>${lv.sum.toFixed(2)}</b><i>買第一張後顯示利潤</i>`; lk.className = "pp-ask pp-lock";
     } else { lk.innerHTML = `現在補<b>—</b><i></i>`; lk.className = "pp-ask pp-lock"; }
     const ready = practice() || !!cfg.addr, P = practice() ? "練習｜" : "";
-    $("#pp-msg").textContent = ready ? P + d.msg : "先到插件設定填你的錢包地址（右鍵插件圖示 → 選項）";
+    let warnTxt = "";
+    if (d.phase === "first" && d.suggest) {
+      const x = dr[d.suggest.side];
+      warnTxt = x == null ? `　⚠ 近 20 秒資料不足，看不出 ${d.suggest.side} 跌了多少。`
+        : x.drop < L.DROP_MIN - 1e-9 ? `　⚠ ${d.suggest.side} 近 20 秒只跌 ${x.drop.toFixed(2)}（成功的場次多半跌 0.10 以上才買；輸的 11:10 那場只跌 0.06）。` : "";
+    }
+    $("#pp-msg").textContent = ready ? P + d.msg + warnTxt : "先到插件設定填你的錢包地址（右鍵插件圖示 → 選項）";
     $("#pp-msg").className = "pp-msg " + (ready ? d.level : "stop");
     const go = $("#pp-go"), sg = ready ? d.suggest : null;
-    go.disabled = !sg;
+    go.disabled = !sg; go.classList.toggle("warn", !!warnTxt);
     go.textContent = !sg ? "現在沒有可以做的" : P + (sg.kind === "market" && sg.shares == null ? `空白鍵：市價買 ${sg.side} $${sg.amount}（U／D 指定邊）`
       : `空白鍵：直接買 ${sg.side} ${sg.shares.toFixed(2)} 股（${lv && lv.kind === "lock" ? (lv.pct >= 0 ? "+" : "") + (lv.pct * 100).toFixed(1) + "%" : ""}）`);
     if (document.activeElement !== modeBox) modeBox.checked = practice();

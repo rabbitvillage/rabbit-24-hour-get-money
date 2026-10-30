@@ -99,3 +99,13 @@ test("market fills leave a few odd shares: within 3% still counts as a pair", ()
   const far = L.positionFrom([buy("Up", 0.35, 14.29, 1), buy("Down", 0.55, 10, 9)]);
   assert.strictEqual(L.decide(60, { Up: 0.4, Down: 0.6 }, far).phase, "second");
 });
+
+test("recent 20 s drop: high of the window minus now; unknown with under 10 s of data", () => {
+  const h = []; for (let s = -5; s <= 10; s++) h.push([s, s > 0 ? 0.5 - s * 0.015 : 0.5, 0.5]);
+  const r = L.recentDrop(h, "Up", 10);
+  assert.ok(Math.abs(r.drop - 0.15) < 1e-9 && r.hi === 0.5 && r.span === 15);
+  assert.ok(L.recentDrop(h, "Down", 10).drop === 0);
+  assert.strictEqual(L.recentDrop(h.slice(-5), "Up", 10), null);
+  const old = [[-30, 0.9, 0.1], ...h]; assert.ok(Math.abs(L.recentDrop(old, "Up", 10).drop - 0.15) < 1e-9);  // older than 20 s ignored
+  assert.strictEqual(L.DROP_MIN, 0.10);
+});

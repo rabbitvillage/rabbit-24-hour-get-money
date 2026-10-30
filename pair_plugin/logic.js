@@ -140,8 +140,19 @@ var PairLogic = (function () {
     return got > 0 ? { price: cost / got, shares: got } : null;
   }
 
+  // 近 win 秒這一邊跌了多少：hist = [[秒, Up 賣價, Down 賣價], ...]（每秒一筆，含開盤前）。
+  // 回傳 {hi, now, drop, span}；資料不到 win/2 秒回傳 null。fish 10-30：成功場次多在 20 秒內跌 0.10 以上才買。
+  const DROP_MIN = 0.10;
+  function recentDrop(hist, side, sNow, win) {
+    win = win || 20; const k = side === "Up" ? 1 : 2;
+    const pts = hist.filter(h => h[0] >= sNow - win && h[0] <= sNow && h[k] != null);
+    if (!pts.length || pts[pts.length - 1][0] - pts[0][0] < win / 2) return null;
+    const hi = Math.max(...pts.map(h => h[k])), now = pts[pts.length - 1][k];
+    return { hi, now, drop: hi - now, span: pts[pts.length - 1][0] - pts[0][0] };
+  }
+
   // 每場紀錄匯出成 CSV（給之後分析 fish 的進場判斷）
-  const COLS = ["mode", "slug", "asset", "leg1_side", "leg1_price", "leg1_shares", "leg1_s", "click_s", "click_side", "click_up_ask", "click_dn_ask",
+  const COLS = ["mode", "slug", "asset", "leg1_side", "leg1_price", "leg1_shares", "leg1_s", "click_s", "click_side", "click_up_ask", "click_dn_ask", "drop20",
                 "cl_click", "line", "line_src", "dist_usd", "dist_bps", "dist_z", "path60",
                 "leg2_price", "leg2_shares", "leg2_placed_s", "leg2_taker", "leg2_filled_shares", "leg2_fill_price", "leg2_fill_s", "leg2_fill_strict", "winner", "paired", "pnl"];
   function toCSV(records) {
@@ -150,6 +161,6 @@ var PairLogic = (function () {
     return [COLS.join(",")].concat(records.map(r => COLS.map(c => esc(r[c])).join(","))).join("\n") + "\n";
   }
 
-  return { FEE_RATE, DEFAULTS, EPS_SH, fee, pairProfit, makerProfit, leg2Price, leg2Cap, positionFrom, decide, settle, other, toCSV, COLS, distance, lineFrom, fillMarket, fillShares, lockNow };
+  return { FEE_RATE, DEFAULTS, EPS_SH, fee, pairProfit, makerProfit, leg2Price, leg2Cap, positionFrom, decide, settle, other, toCSV, COLS, distance, lineFrom, fillMarket, fillShares, lockNow, recentDrop, DROP_MIN };
 })();
 if (typeof module !== "undefined") module.exports = PairLogic;

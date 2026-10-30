@@ -30,3 +30,6 @@
 #pp-panel .pp-lock.up i{color:#d1fae5}
 #pp-panel .pp-lock.down{background:#7f1d1d}
 #pp-panel .pp-lock.down i{color:#fecaca}
+#pp-panel .pp-ask.deep i{color:#6ee7b7}
+#pp-panel .pp-ask.shallow i{color:#fbbf24}
+#pp-panel .pp-go.warn{background:#f59e0b;color:#3b2300}
