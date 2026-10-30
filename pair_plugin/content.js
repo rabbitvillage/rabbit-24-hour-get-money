@@ -6,6 +6,9 @@
 (function () {
   "use strict";
   const L = PairLogic;
+  const VER = (() => { try { return chrome.runtime.getManifest().version; } catch (e) { return "?"; } })();
+  // 插件重新載入後，已開著的分頁裡的舊程式會變成「孤兒」（chrome.runtime.id 消失）：這時要讓開、提示重新整理頁面
+  const alive = () => { try { return !!(chrome.runtime && chrome.runtime.id); } catch (e) { return false; } };
   const WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
   const SLUG_RE = /((btc|eth|sol|xrp)-updown-5m-(\d{9,11}))/;
   const CFG0 = { addr: "", amount: 5, margin: L.DEFAULTS.MARGIN, last: L.DEFAULTS.LAST, practice: true };
@@ -258,7 +261,7 @@
     save();
   }
   function guard(e) {
-    if (!mkt) return; const bb = classify(e.target); if (!bb || bb.sell) return;
+    if (!mkt || !alive()) return; const bb = classify(e.target); if (!bb || bb.sell) return;
     const block = why => { e.preventDefault(); e.stopImmediatePropagation(); flash("擋下：" + why); warn("擋下：" + why); };
     if (practice()) return block("練習模式中不會真的下單；要真的下單，先在面板上關掉練習模式");
     if (!cfg.addr) return block("先在插件設定填你的錢包地址，插件才知道你買了什麼");
@@ -287,7 +290,7 @@
   }
   document.addEventListener("click", guard, true);
   document.addEventListener("keydown", e => {
-    if (e.key !== "Enter" || !mkt) return; const a = document.activeElement;
+    if (e.key !== "Enter" || !mkt || !alive()) return; const a = document.activeElement;
     if (a && a.tagName === "INPUT") { e.preventDefault(); e.stopImmediatePropagation(); flash("請用按鈕或空白鍵下單（輸入框裡的 Enter 已停用）"); }
   }, true);
 
@@ -368,7 +371,7 @@
   }
   panel.querySelector("#pp-go").onclick = e => { e.preventDefault(); e.stopPropagation(); quickBuy(); };
   document.addEventListener("keydown", e => {
-    if (!mkt || e.repeat) return;
+    if (!mkt || e.repeat || !alive()) return;
     const a = document.activeElement;
     if (a && ((a.tagName === "INPUT" && !/^(checkbox|radio|button)$/i.test(a.type)) || a.tagName === "TEXTAREA" || a.isContentEditable)) return;
     const f = e.code === "Space" ? null : e.code === "KeyU" ? "Up" : e.code === "KeyD" ? "Down" : undefined;
@@ -389,7 +392,13 @@
   function render() {
     mount();
     const $ = s => panel.querySelector(s);
-    if (!mkt) { $("#pp-title").textContent = "開盤配對助手"; $("#pp-time").textContent = ""; $("#pp-msg").textContent = "打開任何一場 BTC／ETH／SOL 5 分鐘盤"; $("#pp-msg").className = "pp-msg"; $("#pp-go").disabled = true; lastDecision = null; return; }
+    if (!alive()) {                                   // 舊版程式：停用並提示
+      $("#pp-title").textContent = `開盤配對助手 v${VER}（舊版，已停用）`;
+      $("#pp-msg").textContent = "插件已更新：請按 Cmd+R 重新整理這一頁，才會換成新版。舊版已停止接管空白鍵和下單按鈕。";
+      $("#pp-msg").className = "pp-msg stop"; $("#pp-go").disabled = true; $("#pp-go").textContent = "請按 Cmd+R 重新整理頁面";
+      lastDecision = null; return;
+    }
+    if (!mkt) { $("#pp-title").textContent = `開盤配對助手 v${VER}`; $("#pp-time").textContent = ""; $("#pp-msg").textContent = "打開任何一場 BTC／ETH／SOL 5 分鐘盤"; $("#pp-msg").className = "pp-msg"; $("#pp-go").disabled = true; lastDecision = null; return; }
     const s = Date.now() / 1000 - mkt.start, asks = asksNow();
     const si = Math.floor(s); if (!hist.length || hist[hist.length - 1][0] !== si) { hist.push([si, asks.Up, asks.Down]); if (hist.length > 400) hist.shift(); }
     simTick(s);
@@ -400,7 +409,7 @@
     }
     const st = stOf(mkt.slug), d = L.decide(s, asks, pos, Object.assign(lcfg(), { fillPrice }), st);
     lastDecision = d;
-    const hh = new Date(mkt.start * 1000); $("#pp-title").textContent = `${mkt.asset} ${String(hh.getHours()).padStart(2, "0")}:${String(hh.getMinutes()).padStart(2, "0")} 場`;
+    const hh = new Date(mkt.start * 1000); $("#pp-title").textContent = `${mkt.asset} ${String(hh.getHours()).padStart(2, "0")}:${String(hh.getMinutes()).padStart(2, "0")} 場 · v${VER}`;
     $("#pp-time").textContent = s < 0 ? `開盤前 ${Math.ceil(-s)}s` : `開盤後 +${Math.floor(s)}s`;
     const hot = x => d.suggest && d.suggest.side === x;
     $("#pp-up").innerHTML = `Up 賣價<b>${asks.Up == null ? "—" : asks.Up.toFixed(2)}</b>`; $("#pp-up").className = "pp-ask" + (hot("Up") ? " hot" : "");
