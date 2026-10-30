@@ -138,7 +138,7 @@
     if (!mkt || !pos.first) return;
     const rec = recOf(), s1 = pos.first, s2 = L.other(s1);
     Object.assign(rec, { leg1_side: s1, leg1_price: pos[s1].avg, leg1_shares: pos[s1].shares, leg1_s: pos[s1].firstTs - mkt.start,
-                         leg2_filled_shares: pos[s2].shares, leg2_fill_s: pos[s2].lastTs != null ? pos[s2].lastTs - mkt.start : null });
+                         leg2_filled_shares: pos[s2].shares, leg2_fill_price: pos[s2].avg, leg2_fill_s: pos[s2].lastTs != null ? pos[s2].lastTs - mkt.start : null });
     save();
   }
   async function loadTrades() {

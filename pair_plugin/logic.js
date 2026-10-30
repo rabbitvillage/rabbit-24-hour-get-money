@@ -133,7 +133,7 @@ var PairLogic = (function () {
   // 每場紀錄匯出成 CSV（給之後分析 fish 的進場判斷）
   const COLS = ["mode", "slug", "asset", "leg1_side", "leg1_price", "leg1_shares", "leg1_s", "click_s", "click_side", "click_up_ask", "click_dn_ask",
                 "cl_click", "line", "line_src", "dist_usd", "dist_bps", "dist_z", "path60",
-                "leg2_price", "leg2_shares", "leg2_placed_s", "leg2_taker", "leg2_filled_shares", "leg2_fill_s", "leg2_fill_strict", "winner", "paired", "pnl"];
+                "leg2_price", "leg2_shares", "leg2_placed_s", "leg2_taker", "leg2_filled_shares", "leg2_fill_price", "leg2_fill_s", "leg2_fill_strict", "winner", "paired", "pnl"];
   function toCSV(records) {
     const esc = v => { if (v == null) return ""; const s = typeof v === "number" ? String(Math.round(v * 10000) / 10000) : String(v);
                        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
